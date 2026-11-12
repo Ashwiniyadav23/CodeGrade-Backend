@@ -46,13 +46,20 @@ async function evaluateSubmissionNow(sub: any, A: any) {
     code += `\n=== FILE: ${e.entryName} ===\n${t}\n`
   }
   if (!code) throw new Error('No source files found in the submission.')
-  const rubric = A.rubric.map((c: any) => `- id:${c.id} | ${c.name} | max ${c.marks}\n  Rubric requirements: ${c.description}`).join('\n')
+  const rubric = A.rubric.map((c: any) => JSON.stringify({
+    criterion_id: String(c.id),
+    name: c.name,
+    maximum_marks: Number(c.marks),
+    requirements: c.description,
+  })).join('\n')
   const questions = A.questions.map((q: any, i: number) => `${i + 1}. ${q.title}: ${q.description} ${q.instructions}`).join('\n')
   const prompt = `You are an independent, strict, and unbiased evaluator.
 
 Evaluate the complete submitted source archive objectively against only the assessment requirements and rubric below. Inspect the actual files and code before judging each criterion. Do not assume a feature is missing without checking relevant files, and do not claim a feature is working without evidence. If the archive does not provide enough evidence to verify a requirement, state that limitation explicitly rather than guessing.
 
-Evaluate every rubric criterion separately using only its assigned maximum marks. Award full marks when the requirement is demonstrably satisfied, fair partial marks for a partially implemented requirement, and zero only when it is absent or clearly fails. Do not introduce unstated requirements, optional improvements, style preferences, or best practices as deductions. Do not penalize the same defect twice. Keep praise and deductions consistent.
+Evaluate every rubric criterion separately using only its assigned maximum marks. Treat each criterion as an independent item: copy its exact criterion_id and name, never merge criterion names, and never create, omit, or rename criteria. Award full marks when the requirement is demonstrably satisfied, fair partial marks for a partially implemented requirement, and zero only when it is absent or clearly fails. Do not introduce unstated requirements, optional improvements, style preferences, or best practices as deductions. Do not penalize the same defect twice. Keep praise and deductions consistent.
+
+Use the complete archive, including every relevant source file, configuration file, route, component, and test. A requirement is not missing merely because it is not shown in one file or because you did not find it on a first pass. Do not infer implementation from the assessment text, filenames, comments, or a student's claim. Conversely, do not report an omission unless you checked the relevant files and can name the exact inspected evidence. Distinguish an implemented endpoint from a similar but different endpoint, and distinguish an unverified runtime behavior from source-code evidence.
 
 For every criterion, feedback must identify the exact requirement assessed, the evidence (file path and relevant implementation or observation), and why the awarded score is justified. For every deduction, explicitly state the unsatisfied requirement, evidence, why it falls short, and the marks deducted. Include these deduction explanations in the criterion feedback or weaknesses.
 
@@ -62,7 +69,7 @@ The final performance level must be calculated exclusively from the final percen
 
 ASSESSMENT REQUIREMENTS:
 ASSESSMENT: ${A.title} (${A.language}, ${A.difficulty})\nQUESTIONS:\n${questions}\nRUBRIC:\n${rubric}\n\nSTUDENT CODE:${code}
-Respond with ONLY valid JSON matching this shape: {"criteria":[{"criterion_id":"<id>","level":"excellent|good|average|needs_improvement","score":<number 0..max>,"feedback":"<requirement, evidence, score justification, and—if deducted—the exact shortfall, reason, and marks deducted>","evidence":"<file path + relevant implementation, snippet, or explicit verification limitation>"}],"strengths":["<genuine demonstrated strength with evidence>"],"weaknesses":["<actual weakness or deduction: requirement; evidence; why it falls short; marks deducted>"],"suggestions":["<specific improvement required to reach full marks>"],"mentor_recommendations":"<clear next learning step and mentor focus>","summary":"<2-3 evidence-based sentences>","performance_level":"Basic|Average|Good|Excellent"}`
+The rubric criteria in the output must be exactly the same count and order as the rubric input. Scores must be numbers from 0 through that criterion's maximum, and their sum must equal the total. Respond with ONLY valid JSON matching this shape: {"criteria":[{"criterion_id":"<exact rubric criterion_id>","level":"excellent|good|average|needs_improvement","score":<number 0..max>,"feedback":"<requirement, files inspected, evidence, score justification, and—if deducted—the exact shortfall, reason, and marks deducted>","evidence":"<file path(s) + relevant implementation, or explicit verification limitation>"}],"strengths":["<genuine demonstrated strength with evidence>"],"weaknesses":["<actual weakness or deduction: requirement; inspected evidence; why it falls short; marks deducted>"],"suggestions":["<specific improvement required to reach full marks>"],"mentor_recommendations":"<clear next learning step and mentor focus>","summary":"<2-3 evidence-based sentences>","performance_level":"Basic|Average|Good|Excellent"}`
   const provider = (process.env.AI_PROVIDER || (process.env.GEMINI_API_KEY ? 'gemini' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : 'ollama')).toLowerCase()
   if (provider !== 'ollama' && provider !== 'anthropic' && provider !== 'gemini') {
     throw new Error(`Unsupported AI_PROVIDER "${provider}". Use "gemini", "anthropic", or "ollama".`)

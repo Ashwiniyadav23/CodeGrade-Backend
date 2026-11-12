@@ -158,7 +158,9 @@ app.post('/api/assessments/:id/workspace/run', auth('student'), h(async (req: an
   }
   if (process.env.NODE_ENV === 'production' || process.env.RENDER) return res.status(503).json({ error: 'Secure execution is not configured. Set EXECUTION_SERVICE_URL to an isolated runner.' })
   try {
-    const runner = `const fs=require('fs'),path=require('path'),cp=require('child_process');const d=JSON.parse(fs.readFileSync(0,'utf8'));for(const f of d.files){const p=path.join('/workspace',f.path);fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,f.content)};const e=d.entrypoint||d.files.find(f=>/\\.(js|mjs|cjs)$/.test(f.path))?.path;if(!e)process.exit(2);const p=cp.spawnSync('node',['/workspace/'+e],{cwd:'/workspace',timeout:10000,encoding:'utf8'});process.stdout.write(p.stdout||'');process.stderr.write(p.stderr||'');process.exit(p.status||0);`
+    const requestedCommand = String(req.body.command || '').trim()
+    const safeCommand = requestedCommand && /^(node|ls|pwd|cat)\\s?[\\w./-]*$/.test(requestedCommand) ? requestedCommand : ''
+    const runner = `const fs=require('fs'),path=require('path'),cp=require('child_process');const d=JSON.parse(fs.readFileSync(0,'utf8'));for(const f of d.files){const p=path.join('/workspace',f.path);fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,f.content)};const e=d.entrypoint||d.files.find(f=>/\\.(js|mjs|cjs)$/.test(f.path))?.path;const c=${JSON.stringify(safeCommand)}||('node '+e);const p=cp.spawnSync('/bin/sh',['-c',c.replace(/(^| )([\\w./-]+\\.js)(?= |$)/g,'$1/workspace/$2')],{cwd:'/workspace',timeout:10000,encoding:'utf8'});process.stdout.write(p.stdout||'');process.stderr.write(p.stderr||'');process.exit(p.status||0);`
     const result = await new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve, reject) => {
       const child = spawn('docker', ['run', '--rm', '--network', 'none', '--cpus', '0.5', '--memory', '256m', '--pids-limit', '64', '--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m', '-i', 'node:22-alpine', 'node', '-e', runner])
       activeDockerRuns.set(String(req.user.id), child)

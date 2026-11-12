@@ -149,7 +149,7 @@ app.put('/api/submissions/:id/evaluation', auth('admin'), h(async (req: any, res
   if (!Array.isArray(b.criteria)) return res.status(400).json({ error: 'Evaluation criteria are required' })
   const criteria = b.criteria.map((c: any) => ({ ...c, score: Math.min(Math.max(Number(c.score) || 0, 0), Number(c.max) || 0) }))
   const total = criteria.reduce((t: number, c: any) => t + c.score, 0)
-  const max = Number(b.max) || criteria.reduce((t: number, c: any) => t + Number(c.max || 0), 0)
+  const max = criteria.reduce((t: number, c: any) => t + Number(c.max || 0), 0)
   const percentage = max ? total / max * 100 : 0
   const performance_level = percentage < 30 ? 'Basic' : percentage < 70 ? 'Average' : percentage < 85 ? 'Good' : 'Excellent'
   const ev = await Evaluation.findOneAndUpdate({ submission: req.params.id }, { criteria, total, max, performance_level,

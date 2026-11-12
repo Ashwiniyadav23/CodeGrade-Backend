@@ -65,7 +65,7 @@ For every criterion, feedback must identify the exact requirement assessed, the 
 
 Provide a concise summary, 2-3 genuine evidence-based strengths, actual weaknesses, specific actionable improvements required to reach full marks, and mentor recommendations. Do not use generic praise or unsupported claims. If something cannot be verified from the submission, say so.
 
-The final performance level must be calculated exclusively from the final percentage: 0-29 = Basic, 30-69 = Average, 70-84 = Good, 85-100 = Excellent. Calculate the percentage from the awarded total and maximum before choosing the level. The criteria scores must sum to the awarded total. Do not use "Bad"; use "Basic".
+The final maximum is the sum of the rubric criteria maximum_marks, not a separate assessment total. The final performance level must be calculated exclusively from the final percentage: 0-29 = Basic, 30-69 = Average, 70-84 = Good, 85-100 = Excellent. Calculate the percentage from the awarded total and rubric maximum before choosing the level. The criteria scores must sum to the awarded total. Do not use "Bad"; use "Basic".
 
 ASSESSMENT REQUIREMENTS:
 ASSESSMENT: ${A.title} (${A.language}, ${A.difficulty})\nQUESTIONS:\n${questions}\nRUBRIC:\n${rubric}\n\nSTUDENT CODE:${code}
@@ -123,7 +123,7 @@ The rubric criteria in the output must be exactly the same count and order as th
   const criteria = A.rubric.map((c: any) => { const x = ai.criteria.find((y: any) => y.criterion_id === c.id) ?? {}
     return { criterion_id: c.id, name: c.name, max: c.marks, score: Math.min(Math.max(Number(x.score) || 0, 0), c.marks), level: x.level ?? 'average', feedback: x.feedback ?? '', evidence: x.evidence ?? '' } })
   const total = criteria.reduce((t: number, c: any) => t + c.score, 0)
-  const max = Number(A.max_marks) || criteria.reduce((t: number, c: any) => t + c.max, 0)
+  const max = criteria.reduce((t: number, c: any) => t + c.max, 0)
   const percentage = max ? total / max * 100 : 0
   const performance_level = percentage < 30 ? 'Basic' : percentage < 70 ? 'Average' : percentage < 85 ? 'Good' : 'Excellent'
   return { criteria, total, max, strengths: ai.strengths ?? [], weaknesses: ai.weaknesses ?? [], suggestions: ai.suggestions ?? [], mentor_recommendations: ai.mentor_recommendations ?? '', summary: ai.summary ?? '', performance_level }

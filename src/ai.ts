@@ -46,7 +46,7 @@ async function evaluateSubmissionNow(sub: any, A: any) {
     code += `\n=== FILE: ${e.entryName} ===\n${t}\n`
   }
   if (!code) throw new Error('No source files found in the submission.')
-  const rubric = A.rubric.map((c: any) => `- id:${c.id} | ${c.name} | max ${c.marks} | ${c.description}\n   Excellent: ${c.levels?.excellent}\n   Good: ${c.levels?.good}\n   Average: ${c.levels?.average}\n   Needs Improvement: ${c.levels?.needs_improvement}`).join('\n')
+  const rubric = A.rubric.map((c: any) => `- id:${c.id} | ${c.name} | max ${c.marks}\n  Rubric requirements: ${c.description}`).join('\n')
   const questions = A.questions.map((q: any, i: number) => `${i + 1}. ${q.title}: ${q.description} ${q.instructions}`).join('\n')
   const prompt = `You are an independent, strict, and unbiased evaluator.
 

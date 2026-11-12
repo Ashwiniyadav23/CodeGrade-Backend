@@ -7,8 +7,8 @@ import jwt from 'jsonwebtoken'
 import multer from 'multer'
 import path from 'path'
 import fs from 'fs'
-import { User, Assessment, Assignment, Submission, Evaluation } from './models'
-import { evaluateSubmission } from './ai'
+import { User, Assessment, Assignment, Submission, Evaluation } from './models.js'
+import { evaluateSubmission } from './ai.js'
 
 const SECRET = process.env.JWT_SECRET || 'dev-secret'
 const frontendOrigins = (process.env.FRONTEND_ORIGIN || 'http://localhost:5173,http://localhost:5174,http://localhost:5175')

@@ -11,6 +11,9 @@ import { User, Assessment, Assignment, Submission, Evaluation } from './models.j
 import { evaluateSubmission } from './ai.js'
 
 const SECRET = process.env.JWT_SECRET || 'dev-secret'
+const uploadRoot = process.env.VERCEL ? '/tmp/codegrade/uploads' : path.resolve('uploads')
+fs.mkdirSync(path.join(uploadRoot, 'starters'), { recursive: true })
+fs.mkdirSync(path.join(uploadRoot, 'submissions'), { recursive: true })
 const frontendOrigins = (process.env.FRONTEND_ORIGIN || 'http://localhost:5173,http://localhost:5174,http://localhost:5175')
   .split(',').map(origin => origin.trim()).filter(Boolean)
 const app = express(); app.disable('x-powered-by'); app.use(cors({
@@ -37,10 +40,10 @@ const auth = (...roles: string[]) => async (req: any, res: any, next: any) => {
   try { const { id } = jwt.verify((req.headers.authorization || '').replace('Bearer ', ''), SECRET) as any; const u = await User.findById(id); if (!u) throw 0
     if (roles.length && !roles.includes(u.role)) return res.status(403).json({ error: 'Forbidden' }); req.user = u; next() } catch { res.status(401).json({ error: 'Unauthorized' }) } }
 const storage = (dir: string, zipOnly: boolean) => multer({ limits: { fileSize: 50 * 1024 * 1024 },
-  storage: multer.diskStorage({ destination: `uploads/${dir}`, filename: (req: any, f, cb) => cb(null, `${req.user.id}-${Date.now()}${path.extname(f.originalname)}`) }),
+  storage: multer.diskStorage({ destination: path.join(uploadRoot, dir), filename: (req: any, f, cb) => cb(null, `${req.user.id}-${Date.now()}${path.extname(f.originalname)}`) }),
   fileFilter: (_r, f, cb) => cb(null, !zipOnly || f.originalname.toLowerCase().endsWith('.zip')) })
 
-app.use('/uploads/starters', express.static('uploads/starters'))   // starter files are public; submissions are not
+app.use('/uploads/starters', express.static(path.join(uploadRoot, 'starters')))   // starter files are public; submissions are not
 app.get('/api/health', (_req, res) => res.json({ ok: true, database: mongoose.connection.readyState === 1 }))
 
 // ---------- Auth ----------

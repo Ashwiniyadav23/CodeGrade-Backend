@@ -145,9 +145,16 @@ app.post('/api/submissions/:id/evaluate', auth('admin'), h(async (req: any, res:
     await Evaluation.findOneAndUpdate({ submission: s!.id }, { ...r, status: 'draft' }, { upsert: true }); s!.status = 'review'; await s!.save(); res.json({ ok: true })
   } catch (e: any) { s!.status = 'submitted'; await s!.save(); res.status(500).json({ error: e.message }) } }))
 app.put('/api/submissions/:id/evaluation', auth('admin'), h(async (req: any, res: any) => {
-  const b = req.body, criteria = b.criteria.map((c: any) => ({ ...c, score: Math.min(Math.max(Number(c.score) || 0, 0), c.max) }))
-  const ev = await Evaluation.findOneAndUpdate({ submission: req.params.id }, { criteria, total: criteria.reduce((t: number, c: any) => t + c.score, 0), strengths: b.strengths, weaknesses: b.weaknesses,
-    suggestions: b.suggestions, summary: b.summary, status: b.publish ? 'published' : 'draft' }, { new: true })
+  const b = req.body
+  if (!Array.isArray(b.criteria)) return res.status(400).json({ error: 'Evaluation criteria are required' })
+  const criteria = b.criteria.map((c: any) => ({ ...c, score: Math.min(Math.max(Number(c.score) || 0, 0), Number(c.max) || 0) }))
+  const total = criteria.reduce((t: number, c: any) => t + c.score, 0)
+  const max = Number(b.max) || criteria.reduce((t: number, c: any) => t + Number(c.max || 0), 0)
+  const percentage = max ? total / max * 100 : 0
+  const performance_level = percentage < 30 ? 'Basic' : percentage < 70 ? 'Average' : percentage < 85 ? 'Good' : 'Excellent'
+  const ev = await Evaluation.findOneAndUpdate({ submission: req.params.id }, { criteria, total, max, performance_level,
+    strengths: b.strengths, weaknesses: b.weaknesses, suggestions: b.suggestions, mentor_recommendations: b.mentor_recommendations,
+    summary: b.summary, status: b.publish ? 'published' : 'draft' }, { new: true })
   await Submission.findByIdAndUpdate(req.params.id, { status: b.publish ? 'published' : 'review' }); res.json(ev) }))
 
 app.use((e: any, _q: any, res: any, _n: any) => { console.error(e); res.status(500).json({ error: e.message || 'Server error' }) })

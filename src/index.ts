@@ -74,7 +74,11 @@ app.get('/api/assessments/:id', auth('admin'), h(async (req: any, res: any) => r
 app.put('/api/assessments/:id', auth('admin'), h(async (req: any, res: any) => res.json(await Assessment.findByIdAndUpdate(req.params.id, req.body, { new: true }))))
 app.delete('/api/assessments/:id', auth('admin'), h(async (req: any, res: any) => {
   const subs = await Submission.find({ assessment: req.params.id })
-  subs.forEach(s => s.zip_path && fs.existsSync(s.zip_path) && fs.unlinkSync(s.zip_path))
+  const bucket = mongoose.connection.db && new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'submissions' })
+  for (const s of subs) {
+    if (s.zip_path && fs.existsSync(s.zip_path)) fs.unlinkSync(s.zip_path)
+    if (s.file_id && bucket) await bucket.delete(s.file_id).catch(() => undefined)
+  }
   await Evaluation.deleteMany({ submission: { $in: subs.map(s => s.id) } }); await Submission.deleteMany({ assessment: req.params.id })
   await Assignment.deleteMany({ assessment: req.params.id }); await Assessment.findByIdAndDelete(req.params.id); res.json({ ok: true }) }))
 
@@ -101,7 +105,19 @@ app.post('/api/assessments/:id/submissions', auth('student'), storage('submissio
   const prev = await Submission.findOne({ assessment: A.id, student: req.user.id }).sort('-created_at')
   if (prev && !A.allow_resubmit) return fail(400, 'Resubmission is not allowed')
   if (!req.file && !req.body.github_url) return fail(400, 'Upload a ZIP file or add a GitHub link')
-  res.json(await Submission.create({ assessment: A.id, student: req.user.id, zip_path: req.file?.path, github_url: req.body.github_url || undefined, version: (prev?.version ?? 0) + 1 })) }))
+  let file_id
+  if (req.file) {
+    const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'submissions' })
+    const upload = bucket.openUploadStream(req.file.filename, { contentType: req.file.mimetype })
+    await new Promise<void>((resolve, reject) => {
+      upload.once('finish', resolve)
+      upload.once('error', reject)
+      upload.end(fs.readFileSync(req.file.path))
+    })
+    file_id = upload.id
+    fs.unlinkSync(req.file.path)
+  }
+  res.json(await Submission.create({ assessment: A.id, student: req.user.id, file_id, github_url: req.body.github_url || undefined, version: (prev?.version ?? 0) + 1 })) }))
 
 // ---------- Admin: submissions, AI evaluation, publishing ----------
 app.get('/api/submissions', auth('admin'), h(async (_q: any, res: any) => {
@@ -112,7 +128,15 @@ app.get('/api/submissions/:id', auth('admin'), h(async (req: any, res: any) => {
   const submission = await Submission.findById(req.params.id).populate('assessment', 'title max_marks').populate('student', 'full_name email')
   res.json({ submission, evaluation: await Evaluation.findOne({ submission: req.params.id }) }) }))
 app.get('/api/submissions/:id/download', auth('admin'), h(async (req: any, res: any) => {
-  const s = await Submission.findById(req.params.id); if (!s?.zip_path) return res.status(404).json({ error: 'No file' }); res.download(path.resolve(s.zip_path)) }))
+  const s = await Submission.findById(req.params.id)
+  if (!s) return res.status(404).json({ error: 'Submission not found' })
+  if (s.zip_path && fs.existsSync(s.zip_path)) return res.download(path.resolve(s.zip_path))
+  if (!s.file_id) return res.status(404).json({ error: 'No file' })
+  const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'submissions' })
+  res.setHeader('Content-Type', 'application/zip')
+  res.setHeader('Content-Disposition', 'attachment; filename="submission.zip"')
+  bucket.openDownloadStream(s.file_id).on('error', () => { if (!res.headersSent) res.status(404).json({ error: 'No file' }) }).pipe(res)
+}))
 app.post('/api/submissions/:id/evaluate', auth('admin'), h(async (req: any, res: any) => {
   const s = await Submission.findById(req.params.id); const A = await Assessment.findById(s!.assessment)
   if (!A!.rubric.length) return res.status(400).json({ error: 'Add rubric criteria to this assessment first' })

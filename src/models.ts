@@ -10,7 +10,7 @@ export const Assessment = model('Assessment', new Schema({
   allow_resubmit: { type: Boolean, default: false }, starter_url: String, questions: { type: Array, default: [] }, rubric: { type: Array, default: [] }, created_by: ref('User'), created_at: { type: Date, default: Date.now } }))
 const asg = new Schema({ assessment: ref('Assessment'), student: ref('User') }); asg.index({ assessment: 1, student: 1 }, { unique: true }); asg.index({ student: 1, assessment: 1 })
 export const Assignment = model('Assignment', asg)
-const submissionSchema = new Schema({ assessment: ref('Assessment'), student: ref('User'), zip_path: String, github_url: String, version: { type: Number, default: 1 },
+const submissionSchema = new Schema({ assessment: ref('Assessment'), student: ref('User'), zip_path: String, file_id: Schema.Types.ObjectId, github_url: String, version: { type: Number, default: 1 },
   status: { type: String, enum: ['submitted', 'evaluating', 'review', 'published'], default: 'submitted' }, created_at: { type: Date, default: Date.now } })
 submissionSchema.index({ assessment: 1, student: 1, created_at: -1 })
 submissionSchema.index({ created_at: -1 })

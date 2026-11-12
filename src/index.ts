@@ -15,7 +15,9 @@ const frontendOrigins = (process.env.FRONTEND_ORIGIN || 'http://localhost:5173,h
   .split(',').map(origin => origin.trim()).filter(Boolean)
 const app = express(); app.disable('x-powered-by'); app.use(cors({
   origin: (origin, callback) => callback(null, !origin || frontendOrigins.includes(origin)),
-})); app.use(express.json({ limit: '5mb' }))
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+})); app.options('*', cors()); app.use(express.json({ limit: '5mb' }))
 app.use((_req, res, next) => { res.setTimeout(180000, () => { if (!res.headersSent) res.status(504).json({ error: 'Request timed out' }) }); next() })
 const h = (fn: any) => (req: any, res: any, next: any) => Promise.resolve(fn(req, res, next)).catch(next)
 const sign = (u: any) => jwt.sign({ id: u.id }, SECRET, { expiresIn: '7d' })

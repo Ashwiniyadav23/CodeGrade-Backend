@@ -48,17 +48,21 @@ async function evaluateSubmissionNow(sub: any, A: any) {
   if (!code) throw new Error('No source files found in the submission.')
   const rubric = A.rubric.map((c: any) => `- id:${c.id} | ${c.name} | max ${c.marks} | ${c.description}\n   Excellent: ${c.levels?.excellent}\n   Good: ${c.levels?.good}\n   Average: ${c.levels?.average}\n   Needs Improvement: ${c.levels?.needs_improvement}`).join('\n')
   const questions = A.questions.map((q: any, i: number) => `${i + 1}. ${q.title}: ${q.description} ${q.instructions}`).join('\n')
-  const prompt = `You are an experienced Full-Stack Development Mentor, Technical Evaluator, and Student Performance Assessor.
+  const prompt = `You are an independent, strict, and unbiased evaluator.
 
-Evaluate only the submitted code and evidence. Compare it against every assessment requirement and rubric criterion. Do not assume missing functionality exists, invent achievements or errors, or penalize the same issue twice. Award fair partial marks for partial implementations and explain specific technical evidence.
+Evaluate the complete submitted source archive objectively against only the assessment requirements and rubric below. Inspect the actual files and code before judging each criterion. Do not assume a feature is missing without checking relevant files, and do not claim a feature is working without evidence. If the archive does not provide enough evidence to verify a requirement, state that limitation explicitly rather than guessing.
 
-Write a concise summary of implemented functionality, missing or incorrect functionality, understanding, readiness, and the most important improvement area. Provide 2-3 evidence-based strengths, specific weaknesses explaining why each matters, actionable improvement suggestions with practical exercises, and mentor recommendations covering readiness, concepts to revise, practice tasks, and whether guided or independent practice is appropriate.
+Evaluate every rubric criterion separately using only its assigned maximum marks. Award full marks when the requirement is demonstrably satisfied, fair partial marks for a partially implemented requirement, and zero only when it is absent or clearly fails. Do not introduce unstated requirements, optional improvements, style preferences, or best practices as deductions. Do not penalize the same defect twice. Keep praise and deductions consistent.
+
+For every criterion, feedback must identify the exact requirement assessed, the evidence (file path and relevant implementation or observation), and why the awarded score is justified. For every deduction, explicitly state the unsatisfied requirement, evidence, why it falls short, and the marks deducted. Include these deduction explanations in the criterion feedback or weaknesses.
+
+Provide a concise summary, 2-3 genuine evidence-based strengths, actual weaknesses, specific actionable improvements required to reach full marks, and mentor recommendations. Do not use generic praise or unsupported claims. If something cannot be verified from the submission, say so.
 
 The final performance level must be calculated exclusively from the final percentage: 0-29 = Basic, 30-69 = Average, 70-84 = Good, 85-100 = Excellent. Calculate the percentage from the awarded total and maximum before choosing the level. The criteria scores must sum to the awarded total. Do not use "Bad"; use "Basic".
 
 ASSESSMENT REQUIREMENTS:
 ASSESSMENT: ${A.title} (${A.language}, ${A.difficulty})\nQUESTIONS:\n${questions}\nRUBRIC:\n${rubric}\n\nSTUDENT CODE:${code}
-Respond with ONLY valid JSON: {"criteria":[{"criterion_id":"<id>","level":"excellent|good|average|needs_improvement","score":<number 0..max>,"feedback":"<specific evidence-based justification>","evidence":"<file + short snippet or observation>"}],"strengths":[""],"weaknesses":[""],"suggestions":[""],"mentor_recommendations":"<clear next learning step and mentor focus>","summary":"<2-3 sentences>","performance_level":"Basic|Average|Good|Excellent"}`
+Respond with ONLY valid JSON matching this shape: {"criteria":[{"criterion_id":"<id>","level":"excellent|good|average|needs_improvement","score":<number 0..max>,"feedback":"<requirement, evidence, score justification, and—if deducted—the exact shortfall, reason, and marks deducted>","evidence":"<file path + relevant implementation, snippet, or explicit verification limitation>"}],"strengths":["<genuine demonstrated strength with evidence>"],"weaknesses":["<actual weakness or deduction: requirement; evidence; why it falls short; marks deducted>"],"suggestions":["<specific improvement required to reach full marks>"],"mentor_recommendations":"<clear next learning step and mentor focus>","summary":"<2-3 evidence-based sentences>","performance_level":"Basic|Average|Good|Excellent"}`
   const provider = (process.env.AI_PROVIDER || (process.env.GEMINI_API_KEY ? 'gemini' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : 'ollama')).toLowerCase()
   if (provider !== 'ollama' && provider !== 'anthropic' && provider !== 'gemini') {
     throw new Error(`Unsupported AI_PROVIDER "${provider}". Use "gemini", "anthropic", or "ollama".`)

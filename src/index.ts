@@ -7,6 +7,7 @@ import jwt from 'jsonwebtoken'
 import multer from 'multer'
 import path from 'path'
 import fs from 'fs'
+import { spawn } from 'child_process'
 import { User, Assessment, Assignment, Submission, Evaluation } from './models.js'
 import { evaluateSubmission } from './ai.js'
 
@@ -23,6 +24,7 @@ const app = express(); app.disable('x-powered-by'); app.use(cors({
 })); app.options('*', cors()); app.use(express.json({ limit: '5mb' }))
 app.use((_req, res, next) => { res.setTimeout(180000, () => { if (!res.headersSent) res.status(504).json({ error: 'Request timed out' }) }); next() })
 const h = (fn: any) => (req: any, res: any, next: any) => Promise.resolve(fn(req, res, next)).catch(next)
+const activeDockerRuns = new Map<string, any>()
 const connectDatabase = async () => {
   if (mongoose.connection.readyState === 1) return
   await mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/codegrade', {
@@ -97,6 +99,88 @@ app.get('/api/assessments/:id/my', auth('student'), h(async (req: any, res: any)
   const submission = await Submission.findOne({ assessment: req.params.id, student: req.user.id }).sort('-created_at')
   const evaluation = submission && await Evaluation.findOne({ submission: submission.id })
   res.json({ assessment, submission, evaluation: evaluation ?? null }) }))
+const validateCodeFiles = (files: any) => {
+  if (!Array.isArray(files) || !files.length || files.length > 30) throw new Error('Add between 1 and 30 files.')
+  const total = files.reduce((size: number, file: any) => {
+    if (!file || typeof file.path !== 'string' || typeof file.content !== 'string' || !file.path.trim()) throw new Error('Each file needs a path and text content.')
+    const normalized = path.posix.normalize(file.path.replaceAll('\\', '/'))
+    if (normalized.startsWith('../') || normalized.startsWith('/') || normalized.includes('/../')) throw new Error('Invalid file path.')
+    if (file.content.length > 200000) throw new Error('Each file must be smaller than 200 KB.')
+    return size + file.content.length
+  }, 0)
+  if (total > 1000000) throw new Error('Workspace must be smaller than 1 MB.')
+  return files.map((file: any) => ({ path: path.posix.normalize(file.path.replaceAll('\\', '/')), content: file.content }))
+}
+const assignedAssessment = async (req: any) => {
+  const A = await Assessment.findById(req.params.id)
+  if (!A || !(await Assignment.findOne({ assessment: A.id, student: req.user.id }))) return null
+  return A
+}
+app.get('/api/assessments/:id/workspace', auth('student'), h(async (req: any, res: any) => {
+  if (!await assignedAssessment(req)) return res.status(403).json({ error: 'Not assigned to you' })
+  const submission = await Submission.findOne({ assessment: req.params.id, student: req.user.id }).sort('-created_at')
+  res.json({ files: submission?.code_files ?? [{ path: 'index.js', content: '// Start coding here\n' }], submitted: submission?.status === 'submitted' || submission?.status === 'review' || submission?.status === 'published' })
+}))
+app.put('/api/assessments/:id/workspace', auth('student'), h(async (req: any, res: any) => {
+  const A = await assignedAssessment(req)
+  if (!A) return res.status(403).json({ error: 'Not assigned to you' })
+  if (A.deadline && A.deadline < new Date()) return res.status(400).json({ error: 'The deadline has passed' })
+  const files = validateCodeFiles(req.body.files)
+  const existing = await Submission.findOne({ assessment: A.id, student: req.user.id }).sort('-created_at')
+  if (existing?.status === 'submitted' && !A.allow_resubmit) return res.status(400).json({ error: 'Resubmission is not allowed' })
+  const submission = existing && existing.status === 'workspace'
+    ? await Submission.findByIdAndUpdate(existing.id, { code_files: files }, { new: true })
+    : await Submission.create({ assessment: A.id, student: req.user.id, code_files: files, version: (existing?.version ?? 0) + 1, status: 'workspace' })
+  res.json({ ok: true, submission })
+}))
+app.post('/api/assessments/:id/workspace/submit', auth('student'), h(async (req: any, res: any) => {
+  const A = await assignedAssessment(req)
+  if (!A) return res.status(403).json({ error: 'Not assigned to you' })
+  if (A.deadline && A.deadline < new Date()) return res.status(400).json({ error: 'The deadline has passed' })
+  const files = validateCodeFiles(req.body.files)
+  const existing = await Submission.findOne({ assessment: A.id, student: req.user.id }).sort('-created_at')
+  if (existing?.status === 'submitted' && !A.allow_resubmit) return res.status(400).json({ error: 'Resubmission is not allowed' })
+  const submission = existing && existing.status === 'workspace'
+    ? await Submission.findByIdAndUpdate(existing.id, { code_files: files, status: 'submitted' }, { new: true })
+    : await Submission.create({ assessment: A.id, student: req.user.id, code_files: files, version: (existing?.version ?? 0) + 1, status: 'submitted' })
+  res.json(submission)
+}))
+app.post('/api/assessments/:id/workspace/run', auth('student'), h(async (req: any, res: any) => {
+  if (!await assignedAssessment(req)) return res.status(403).json({ error: 'Not assigned to you' })
+  const files = validateCodeFiles(req.body.files)
+  const payload = JSON.stringify({ files, entrypoint: req.body.entrypoint || undefined, language: 'javascript' })
+  const serviceUrl = process.env.EXECUTION_SERVICE_URL
+  if (serviceUrl) {
+    const response = await fetch(serviceUrl, { method: 'POST', headers: { 'content-type': 'application/json', ...(process.env.EXECUTION_SERVICE_TOKEN ? { authorization: `Bearer ${process.env.EXECUTION_SERVICE_TOKEN}` } : {}) }, body: payload, signal: AbortSignal.timeout(15000) })
+    const body: any = await response.json().catch(() => ({}))
+    if (!response.ok) return res.status(502).json({ error: body.error || 'Execution service failed' })
+    return res.json({ output: String(body.output || '').slice(0, 20000), error: String(body.error || '').slice(0, 20000), exitCode: body.exitCode ?? null })
+  }
+  if (process.env.NODE_ENV === 'production' || process.env.RENDER) return res.status(503).json({ error: 'Secure execution is not configured. Set EXECUTION_SERVICE_URL to an isolated runner.' })
+  try {
+    const runner = `const fs=require('fs'),path=require('path'),cp=require('child_process');const d=JSON.parse(fs.readFileSync(0,'utf8'));for(const f of d.files){const p=path.join('/workspace',f.path);fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,f.content)};const e=d.entrypoint||d.files.find(f=>/\\.(js|mjs|cjs)$/.test(f.path))?.path;if(!e)process.exit(2);const p=cp.spawnSync('node',['/workspace/'+e],{cwd:'/workspace',timeout:10000,encoding:'utf8'});process.stdout.write(p.stdout||'');process.stderr.write(p.stderr||'');process.exit(p.status||0);`
+    const result = await new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve, reject) => {
+      const child = spawn('docker', ['run', '--rm', '--network', 'none', '--cpus', '0.5', '--memory', '256m', '--pids-limit', '64', '--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m', '-i', 'node:22-alpine', 'node', '-e', runner])
+      activeDockerRuns.set(String(req.user.id), child)
+      let stdout = ''; let stderr = ''
+      child.stdout.on('data', chunk => { stdout += chunk.toString() })
+      child.stderr.on('data', chunk => { stderr += chunk.toString() })
+      child.once('error', reject)
+      child.once('close', code => { activeDockerRuns.delete(String(req.user.id)); resolve({ stdout: stdout.slice(0, 20000), stderr: stderr.slice(0, 20000), code }) })
+      child.stdin.end(payload)
+      setTimeout(() => child.kill('SIGKILL'), 12000)
+    })
+    res.json({ output: result.stdout, error: result.stderr, exitCode: result.code ?? 1 })
+  } catch (error: any) {
+    res.json({ output: error.stdout || '', error: error.stderr || error.message || 'Execution failed', exitCode: error.code ?? 1 })
+  }
+}))
+app.post('/api/assessments/:id/workspace/stop', auth('student'), h(async (req: any, res: any) => {
+  if (!await assignedAssessment(req)) return res.status(403).json({ error: 'Not assigned to you' })
+  const child = activeDockerRuns.get(String(req.user.id))
+  if (child) child.kill('SIGKILL')
+  res.json({ ok: true, stopped: !!child })
+}))
 app.post('/api/assessments/:id/submissions', auth('student'), storage('submissions', true).single('file'), h(async (req: any, res: any) => {
   const fail = (code: number, error: string) => { if (req.file) fs.unlinkSync(req.file.path); return res.status(code).json({ error }) }
   const A = await Assessment.findById(req.params.id)

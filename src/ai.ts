@@ -22,6 +22,14 @@ export async function evaluateSubmission(sub: any, A: any) {
 
 async function evaluateSubmissionNow(sub: any, A: any) {
   let buf: Buffer | null = null
+  if (Array.isArray(sub.code_files) && sub.code_files.length) {
+    let code = ''
+    for (const file of sub.code_files) {
+      if (typeof file?.path !== 'string' || typeof file?.content !== 'string') continue
+      code += `\n=== FILE: ${file.path} ===\n${file.content.slice(0, 12000)}\n`
+    }
+    if (code) return evaluateSource(code, A)
+  }
   if (sub.zip_path && fs.existsSync(sub.zip_path)) buf = fs.readFileSync(sub.zip_path)
   else if (sub.file_id && mongoose.connection.db) {
     const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'submissions' })
@@ -46,6 +54,10 @@ async function evaluateSubmissionNow(sub: any, A: any) {
     code += `\n=== FILE: ${e.entryName} ===\n${t}\n`
   }
   if (!code) throw new Error('No source files found in the submission.')
+  return evaluateSource(code, A)
+}
+
+async function evaluateSource(code: string, A: any) {
   const rubric = A.rubric.map((c: any) => JSON.stringify({
     criterion_id: String(c.id),
     name: c.name,

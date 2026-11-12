@@ -20,6 +20,18 @@ const app = express(); app.disable('x-powered-by'); app.use(cors({
 })); app.options('*', cors()); app.use(express.json({ limit: '5mb' }))
 app.use((_req, res, next) => { res.setTimeout(180000, () => { if (!res.headersSent) res.status(504).json({ error: 'Request timed out' }) }); next() })
 const h = (fn: any) => (req: any, res: any, next: any) => Promise.resolve(fn(req, res, next)).catch(next)
+const connectDatabase = async () => {
+  if (mongoose.connection.readyState === 1) return
+  await mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/codegrade', {
+    maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE || 100),
+    minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE || 10),
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 180000,
+  })
+}
+app.use(async (_req, _res, next) => {
+  try { await connectDatabase(); next() } catch (error) { next(error) }
+})
 const sign = (u: any) => jwt.sign({ id: u.id }, SECRET, { expiresIn: '7d' })
 const auth = (...roles: string[]) => async (req: any, res: any, next: any) => {
   try { const { id } = jwt.verify((req.headers.authorization || '').replace('Bearer ', ''), SECRET) as any; const u = await User.findById(id); if (!u) throw 0
@@ -112,9 +124,10 @@ app.put('/api/submissions/:id/evaluation', auth('admin'), h(async (req: any, res
   await Submission.findByIdAndUpdate(req.params.id, { status: b.publish ? 'published' : 'review' }); res.json(ev) }))
 
 app.use((e: any, _q: any, res: any, _n: any) => { console.error(e); res.status(500).json({ error: e.message || 'Server error' }) })
-mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/codegrade', {
-  maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE || 100),
-  minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE || 10),
-  serverSelectionTimeoutMS: 5000,
-  socketTimeoutMS: 180000,
-}).then(() => app.listen(process.env.PORT || 5000, () => console.log('API on :' + (process.env.PORT || 5000))))
+
+if (!process.env.VERCEL) {
+  connectDatabase().then(() => app.listen(process.env.PORT || 5000, () => console.log('API on :' + (process.env.PORT || 5000))))
+    .catch(error => { console.error('Database connection failed:', error); process.exitCode = 1 })
+}
+
+export default app

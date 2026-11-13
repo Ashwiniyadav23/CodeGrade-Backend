@@ -93,7 +93,8 @@ app.put('/api/assessments/:id/assignments', auth('admin'), h(async (req: any, re
 
 // ---------- Student view + submission ----------
 app.get('/api/assessments/:id/my', auth('student'), h(async (req: any, res: any) => {
-  if (!(await Assignment.findOne({ assessment: req.params.id, student: req.user.id }))) return res.status(403).json({ error: 'Not assigned to you' })
+  const assignment = await Assignment.findOne({ assessment: req.params.id, student: req.user.id })
+  if (!assignment) return res.status(403).json({ error: 'Not assigned to you. Ask an admin to assign this assessment to your student account.' })
   const assessment = await Assessment.findById(req.params.id)
   const submission = await Submission.findOne({ assessment: req.params.id, student: req.user.id }).sort('-created_at')
   const evaluation = submission && await Evaluation.findOne({ submission: submission.id })
@@ -143,24 +144,25 @@ const evaluateAndStore = async (submission: any, assessment: any) => {
     await submission.save()
     throw error
   }
-  const prepareViva = async (submission: any, assessment: any) => {
-    if (!assessment.viva_enabled || submission.viva_questions?.length) return
-    submission.viva_questions = await generateVivaQuestions(submission, assessment)
-    submission.viva_status = 'not_started'
-    await submission.save()
-  }
-  const storeVivaEvaluation = async (submission: any, assessment: any) => {
-    const viva = await evaluateViva(submission, assessment)
-    const existing: any = await Evaluation.findOne({ submission: submission.id })
-    const practicalTotal = Number(existing?.practical_total ?? existing?.total ?? 0)
-    const practicalMax = Number(existing?.practical_max ?? existing?.max ?? assessment.practical_marks ?? 0)
-    const theoryTotal = Number(existing?.theory_total || 0)
-    const theoryMax = Number(existing?.theory_max || 0)
-    const total = practicalTotal + theoryTotal + viva.viva_total
-    const max = practicalMax + theoryMax + viva.viva_max
-    const performance_level = total / Math.max(1, max) * 100 < 30 ? 'Basic' : total / Math.max(1, max) * 100 < 70 ? 'Average' : total / Math.max(1, max) * 100 < 85 ? 'Good' : 'Excellent'
-    return Evaluation.findOneAndUpdate({ submission: submission.id }, { ...viva, criteria:existing?.criteria || [], practical_total:practicalTotal, practical_max:practicalMax, theory_criteria:existing?.theory_criteria || [], theory_total:theoryTotal, theory_max:theoryMax, total, max, performance_level, status:'draft' }, { upsert:true, new:true })
-  }
+}
+const prepareViva = async (submission: any, assessment: any) => {
+  if (!assessment.viva_enabled || submission.viva_questions?.length) return
+  submission.viva_questions = await generateVivaQuestions(submission, assessment)
+  submission.viva_status = 'not_started'
+  await submission.save()
+}
+const storeVivaEvaluation = async (submission: any, assessment: any) => {
+  const viva = await evaluateViva(submission, assessment)
+  const existing: any = await Evaluation.findOne({ submission: submission.id })
+  const practicalTotal = Number(existing?.practical_total ?? existing?.total ?? 0)
+  const practicalMax = Number(existing?.practical_max ?? existing?.max ?? assessment.practical_marks ?? 0)
+  const theoryTotal = Number(existing?.theory_total || 0)
+  const theoryMax = Number(existing?.theory_max || 0)
+  const total = practicalTotal + theoryTotal + viva.viva_total
+  const max = practicalMax + theoryMax + viva.viva_max
+  const percentage = total / Math.max(1, max) * 100
+  const performance_level = percentage < 30 ? 'Basic' : percentage < 70 ? 'Average' : percentage < 85 ? 'Good' : 'Excellent'
+  return Evaluation.findOneAndUpdate({ submission: submission.id }, { ...viva, criteria:existing?.criteria || [], practical_total:practicalTotal, practical_max:practicalMax, theory_criteria:existing?.theory_criteria || [], theory_total:theoryTotal, theory_max:theoryMax, total, max, performance_level, status:'draft' }, { upsert:true, new:true })
 }
 app.get('/api/assessments/:id/workspace', auth('student'), h(async (req: any, res: any) => {
   if (!await assignedAssessment(req)) return res.status(403).json({ error: 'Not assigned to you' })

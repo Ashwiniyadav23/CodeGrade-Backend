@@ -2,6 +2,7 @@ import AdmZip from 'adm-zip'
 import fs from 'fs'
 import mongoose from 'mongoose'
 const EXT = /\.(py|js|jsx|ts|tsx|java|c|cpp|h|hpp|cs|go|rs|php|rb|html|css|sql|json|md|txt|yml|yaml)$/i
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i
 const SKIP = /(node_modules|\.git\/|dist\/|build\/|package-lock|\.min\.|venv\/|__pycache__)/
 let activeJobs = 0
 const waitingJobs: Array<() => void> = []
@@ -47,13 +48,20 @@ async function evaluateSubmissionNow(sub: any, A: any) {
   }
   if (!buf) throw new Error('No readable submission (upload a ZIP or a public GitHub repo).')
   let code = ''
+  const images: string[] = []
   for (const e of new AdmZip(buf).getEntries()) {
-    if (e.isDirectory || !EXT.test(e.entryName) || SKIP.test(e.entryName)) continue
+    if (e.isDirectory || SKIP.test(e.entryName)) continue
+    if (IMAGE_EXT.test(e.entryName)) {
+      images.push(`${e.entryName} (${e.header.size} bytes)`)
+      continue
+    }
+    if (!EXT.test(e.entryName)) continue
     const t = e.getData().toString('utf8').slice(0, 12000)
     if (code.length + t.length > 120000) break
     code += `\n=== FILE: ${e.entryName} ===\n${t}\n`
   }
   if (!code) throw new Error('No source files found in the submission.')
+  if (images.length) code += `\n=== IMAGE ASSETS INCLUDED IN ZIP ===\n${images.join('\n')}\n`
   return evaluateSource(code, A)
 }
 

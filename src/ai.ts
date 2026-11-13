@@ -81,7 +81,14 @@ export const providerResponse = async (prompt: string) => {
       : provider === 'anthropic'
       ? await fetch('https://api.anthropic.com/v1/messages', { method:'POST', headers:{'x-api-key':process.env.ANTHROPIC_API_KEY!, 'anthropic-version':'2023-06-01','content-type':'application/json'}, body:JSON.stringify({ model:process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5-20250929', max_tokens:4000, messages:[{role:'user',content:prompt}]}), signal:controller.signal })
       : await fetch(`${process.env.OLLAMA_URL || 'http://127.0.0.1:11434'}/api/generate`, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({model:process.env.OLLAMA_MODEL || 'llama3.2', prompt, stream:false, format:'json'}), signal:controller.signal })
-    const out: any = await r.json(); if (!r.ok) throw new Error(out.error?.message ?? out.message ?? 'AI request failed')
+    const out: any = await r.json()
+    if (!r.ok) {
+      const msg: string = out.error?.message ?? out.message ?? 'AI request failed'
+      if (r.status === 429 || msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('rate')) {
+        throw new Error('AI quota exceeded. The free-tier daily limit has been reached. Please try again later or ask your admin to upgrade the AI plan. (Tip: switch GEMINI_MODEL to gemini-2.0-flash for a higher free quota.)')
+      }
+      throw new Error(msg)
+    }
     const text = provider === 'ollama' ? out.response ?? '' : provider === 'anthropic' ? out.content?.map((c:any)=>c.text ?? '').join('') ?? '' : out.candidates?.[0]?.content?.parts?.map((p:any)=>p.text ?? '').join('') ?? ''
     const start = text.indexOf('{'); const end = text.lastIndexOf('}')
     if (start < 0 || end < start) throw new Error('AI returned invalid JSON.')
@@ -109,44 +116,6 @@ export async function evaluateTheory(sub: any, A: any, practical: any) {
   const practicalTotal = practicalCriteria.reduce((s:any,c:any)=>s+c.score,0)
   const total = practicalTotal + theoryTotal; const max = configuredPracticalMax + Number(A.theory_marks || 30)
   return { ...practical, ...result, criteria: practicalCriteria, theory_criteria:theoryCriteria, theory_total:theoryTotal, theory_max:Number(A.theory_marks || 30), practical_total:practicalTotal, practical_max:configuredPracticalMax, total, max, performance_level: total/max*100 < 30 ? 'Basic' : total/max*100 < 70 ? 'Average' : total/max*100 < 85 ? 'Good' : 'Excellent' }
-}
-
-export async function generateVivaQuestions(sub: any, A: any) {
-  const count = Math.min(7, Math.max(4, Number(A.viva_question_count || 5)))
-  const code = await submissionCode(sub)
-  const result = await providerResponse(`Create exactly ${count} personalized practical viva questions about this student's submitted code. Use a varied mix of code explanation, logic, output prediction, debugging, error identification, modification, and alternative approach questions. Every question must reference concrete code evidence. Do not reveal answers or ask generic textbook questions. Target difficulty: ${A.viva_difficulty || 'Medium'}. Return only JSON: {"questions":[{"id":"v1","type":"explanation|logic|output|debugging|modification|alternative","question":"..."}]}. ASSIGNMENT: ${A.title}\nREQUIREMENTS: ${A.questions.map((q:any) => q.title + ' ' + q.description).join('\n')}\nCODE:\n${code.slice(0, 120000)}`)
-  if (!Array.isArray(result.questions) || result.questions.length !== count) throw new Error('AI returned an invalid viva question set.')
-  return result.questions.map((q:any, i:number) => ({ id:`viva-${i + 1}`, type:String(q.type || 'logic'), question:String(q.question || '').trim() })).filter((q:any) => q.question)
-}
-
-export async function continueViva(sub: any, A: any) {
-  const questions = sub.viva_questions || []
-  const messages = sub.viva_messages || []
-  const index = Number(sub.viva_question_index || 0)
-  const current = questions[index]
-  if (!current) return { done: true }
-  const result = await providerResponse(`You are conducting a code-grounded practical viva. Judge the student's latest answer using only the submitted code and the conversation. Do not reveal the expected answer. If the answer is incorrect or incomplete, ask one simpler or reasoning-focused follow-up about the same code. If it is adequate, ask the next main question. Never repeat a previous question. Return only JSON: {"kind":"follow_up|next|complete","question":"..."}.\nCURRENT QUESTION: ${current.question}\nCONVERSATION:\n${messages.map((m:any)=>`${m.role}: ${m.text}`).join('\n')}\nCODE:\n${(await submissionCode(sub)).slice(0, 100000)}`)
-  if (result.kind === 'complete' || index >= questions.length - 1 && result.kind !== 'follow_up') return { done:true }
-  if (result.kind === 'next') sub.viva_question_index = index + 1
-  return { done:false, kind:result.kind === 'follow_up' ? 'follow_up' : 'next', question:String(result.question || '').trim() }
-}
-
-export async function generateVivaModification(sub: any, A: any) {
-  const result = await providerResponse(`Create one small code modification challenge based on this student's implementation. It must be testable and specific, but must not include the solution. Return only JSON: {"task":"..."}. CODE:\n${(await submissionCode(sub)).slice(0, 120000)}`)
-  if (!result.task || typeof result.task !== 'string') throw new Error('AI returned an invalid viva modification task.')
-  return result.task.trim()
-}
-
-export async function evaluateViva(sub: any, A: any) {
-  const questions = sub.viva_questions || []
-  const conversation = sub.viva_messages || []
-  const modification = sub.viva_modification_files || []
-  const result = await providerResponse(`Evaluate this student's practical viva against their submitted code. Score each main question and the modification challenge. Assess explanation, logic, output reasoning, debugging, alternatives, and whether the modification is correct. Do not label the student as cheating. Return only JSON: {"criteria":[{"question_id":"viva-1","score":0,"feedback":"..."}],"strengths":[],"weaknesses":[],"suggestions":[],"mentor_recommendations":"","summary":""}. VIVA QUESTIONS:\n${questions.map((q:any)=>`${q.id}: ${q.question}`).join('\n')}\nCONVERSATION:\n${conversation.map((m:any)=>`${m.role}: ${m.text}`).join('\n')}\nMODIFICATION TASK: ${sub.viva_modification_task}\nMODIFIED FILES:\n${modification.map((f:any)=>`${f.path}\n${f.content}`).join('\n')}\nCODE:\n${(await submissionCode(sub)).slice(0, 100000)}`)
-  const per = Number(A.viva_marks || 20) / Math.max(1, questions.length + 1)
-  const criteria = [...questions.map((q:any) => ({ id:q.id, question:q.question })), { id:'viva-modification', question:sub.viva_modification_task || 'Modification challenge' }]
-    .map((q:any) => { const x = result.criteria?.find((c:any)=>c.question_id === q.id) || {}; return { question_id:q.id, question:q.question, answer:conversation.filter((m:any)=>m.question_id === q.id && m.role === 'student').map((m:any)=>m.text).join('\n'), max:per, score:Math.min(Math.max(Number(x.score)||0,0),per), feedback:String(x.feedback || '') } })
-  const total = criteria.reduce((sum:number,c:any)=>sum+c.score,0)
-  return { viva_criteria:criteria, viva_total:total, viva_max:Number(A.viva_marks || 20), strengths:result.strengths || [], weaknesses:result.weaknesses || [], suggestions:result.suggestions || [], mentor_recommendations:result.mentor_recommendations || '', summary:result.summary || '' }
 }
 
 async function evaluateSource(code: string, A: any) {
@@ -217,7 +186,13 @@ The rubric criteria in the output must be exactly the same count and order as th
     clearTimeout(timeout)
   }
   const out: any = await r.json()
-  if (!r.ok) throw new Error(out.error?.message ?? out.message ?? 'AI request failed')
+  if (!r.ok) {
+    const msg: string = out.error?.message ?? out.message ?? 'AI request failed'
+    if (r.status === 429 || msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('rate')) {
+      throw new Error('AI quota exceeded. The free-tier daily limit has been reached. Please try again later or ask your admin to upgrade the AI plan.')
+    }
+    throw new Error(msg)
+  }
   const text = provider === 'ollama'
     ? out.response ?? ''
     : provider === 'anthropic'

@@ -8,7 +8,7 @@ import multer from 'multer'
 import path from 'path'
 import fs from 'fs'
 import { User, Assessment, Assignment, Submission, Evaluation } from './models.js'
-import { evaluateSubmission, evaluateTheory, generateTheoryQuestions, generateVivaQuestions, continueViva, generateVivaModification, evaluateViva } from './ai.js'
+import { evaluateSubmission, evaluateTheory, generateTheoryQuestions } from './ai.js'
 
 const SECRET = process.env.JWT_SECRET || 'dev-secret'
 const uploadRoot = process.env.VERCEL ? '/tmp/codegrade/uploads' : path.resolve('uploads')
@@ -124,13 +124,6 @@ const evaluateAndStore = async (submission: any, assessment: any) => {
     const practical = await evaluateSubmission(submission, assessment)
     const existing: any = await Evaluation.findOne({ submission: submission.id })
     const result: any = submission.theory_submitted ? await evaluateTheory(submission, assessment, practical) : practical
-    if (existing?.viva_criteria?.length) {
-      result.viva_criteria = existing.viva_criteria; result.viva_total = existing.viva_total; result.viva_max = existing.viva_max
-      result.total = Number(result.total || 0) + Number(existing.viva_total || 0)
-      result.max = Number(result.max || 0) + Number(existing.viva_max || 0)
-      const percentage = result.max ? result.total / result.max * 100 : 0
-      result.performance_level = percentage < 30 ? 'Basic' : percentage < 70 ? 'Average' : percentage < 85 ? 'Good' : 'Excellent'
-    }
     const evaluation = await Evaluation.findOneAndUpdate(
       { submission: submission.id },
       { ...result, status: 'draft' },
@@ -144,25 +137,6 @@ const evaluateAndStore = async (submission: any, assessment: any) => {
     await submission.save()
     throw error
   }
-}
-const prepareViva = async (submission: any, assessment: any) => {
-  if (!assessment.viva_enabled || submission.viva_questions?.length) return
-  submission.viva_questions = await generateVivaQuestions(submission, assessment)
-  submission.viva_status = 'not_started'
-  await submission.save()
-}
-const storeVivaEvaluation = async (submission: any, assessment: any) => {
-  const viva = await evaluateViva(submission, assessment)
-  const existing: any = await Evaluation.findOne({ submission: submission.id })
-  const practicalTotal = Number(existing?.practical_total ?? existing?.total ?? 0)
-  const practicalMax = Number(existing?.practical_max ?? existing?.max ?? assessment.practical_marks ?? 0)
-  const theoryTotal = Number(existing?.theory_total || 0)
-  const theoryMax = Number(existing?.theory_max || 0)
-  const total = practicalTotal + theoryTotal + viva.viva_total
-  const max = practicalMax + theoryMax + viva.viva_max
-  const percentage = total / Math.max(1, max) * 100
-  const performance_level = percentage < 30 ? 'Basic' : percentage < 70 ? 'Average' : percentage < 85 ? 'Good' : 'Excellent'
-  return Evaluation.findOneAndUpdate({ submission: submission.id }, { ...viva, criteria:existing?.criteria || [], practical_total:practicalTotal, practical_max:practicalMax, theory_criteria:existing?.theory_criteria || [], theory_total:theoryTotal, theory_max:theoryMax, total, max, performance_level, status:'draft' }, { upsert:true, new:true })
 }
 app.get('/api/assessments/:id/workspace', auth('student'), h(async (req: any, res: any) => {
   if (!await assignedAssessment(req)) return res.status(403).json({ error: 'Not assigned to you' })
@@ -183,55 +157,6 @@ app.post('/api/assessments/:id/theory', auth('student'), h(async (req: any, res:
   await submission.save()
   const evaluation = await evaluateAndStore(submission, A)
   res.json({ submission, evaluation })
-}))
-app.get('/api/assessments/:id/viva', auth('student'), h(async (req: any, res: any) => {
-  const A = await assignedAssessment(req)
-  if (!A || !A.viva_enabled) return res.status(400).json({ error:'Practical viva is not enabled.' })
-  const submission = await Submission.findOne({ assessment:A.id, student:req.user.id }).sort('-created_at')
-  if (!submission?.viva_questions?.length) return res.status(400).json({ error:'Submit your code before starting the viva.' })
-  res.json({ status:submission.viva_status, question:submission.viva_status === 'active' ? submission.viva_questions[submission.viva_question_index] : null, messages:submission.viva_messages, modificationTask:submission.viva_modification_task || null, modificationSubmitted:submission.viva_modification_submitted })
-}))
-app.post('/api/assessments/:id/viva/start', auth('student'), h(async (req: any, res: any) => {
-  const A = await assignedAssessment(req)
-  if (!A || !A.viva_enabled) return res.status(400).json({ error:'Practical viva is not enabled.' })
-  const submission = await Submission.findOne({ assessment:A.id, student:req.user.id }).sort('-created_at')
-  if (!submission?.viva_questions?.length) return res.status(400).json({ error:'Submit your code before starting the viva.' })
-  if (submission.viva_status === 'completed') return res.json({ status:'completed', messages:submission.viva_messages, modificationTask:submission.viva_modification_task })
-  submission.viva_status = 'active'
-  if (!submission.viva_messages?.length) submission.viva_messages.push({ role:'ai', question_id:submission.viva_questions[0].id, text:submission.viva_questions[0].question, kind:'opening', created_at:new Date() })
-  await submission.save()
-  res.json({ status:'active', question:submission.viva_questions[submission.viva_question_index], messages:submission.viva_messages })
-}))
-app.post('/api/assessments/:id/viva/answer', auth('student'), h(async (req: any, res: any) => {
-  const A = await assignedAssessment(req)
-  if (!A || !A.viva_enabled) return res.status(400).json({ error:'Practical viva is not enabled.' })
-  const submission = await Submission.findOne({ assessment:A.id, student:req.user.id }).sort('-created_at')
-  const answer = typeof req.body.answer === 'string' ? req.body.answer.trim().slice(0,10000) : ''
-  if (!submission || submission.viva_status !== 'active' || !answer) return res.status(400).json({ error:'An active viva and non-empty answer are required.' })
-  const question = submission.viva_questions[submission.viva_question_index]
-  submission.viva_messages.push({ role:'student', question_id:question.id, text:answer, created_at:new Date() })
-  const next = await continueViva(submission, A)
-  if (next.done) {
-    submission.viva_status = 'modification'
-    submission.viva_modification_task = await generateVivaModification(submission, A)
-    await submission.save()
-    return res.json({ status:'modification', messages:submission.viva_messages, modificationTask:submission.viva_modification_task })
-  }
-  submission.viva_messages.push({ role:'ai', question_id:question.id, text:next.question, kind:next.kind, created_at:new Date() })
-  await submission.save()
-  res.json({ status:'active', question:{ id:question.id, question:next.question, type:next.kind }, messages:submission.viva_messages })
-}))
-app.post('/api/assessments/:id/viva/modification', auth('student'), h(async (req: any, res: any) => {
-  const A = await assignedAssessment(req)
-  if (!A || !A.viva_enabled) return res.status(400).json({ error:'Practical viva is not enabled.' })
-  const submission = await Submission.findOne({ assessment:A.id, student:req.user.id }).sort('-created_at')
-  if (!submission || submission.viva_status !== 'modification') return res.status(400).json({ error:'Complete the viva questions first.' })
-  const files = validateCodeFiles(req.body.files)
-  submission.viva_modification_files = files; submission.viva_modification_submitted = true; submission.viva_status = 'completed'
-  submission.viva_messages.push({ role:'student', question_id:'viva-modification', text:'Submitted code modification.', created_at:new Date() })
-  await submission.save()
-  const evaluation = await storeVivaEvaluation(submission, A)
-  res.json({ status:'completed', evaluation, messages:submission.viva_messages })
 }))
 app.put('/api/assessments/:id/workspace', auth('student'), h(async (req: any, res: any) => {
   const A = await assignedAssessment(req)
@@ -255,7 +180,6 @@ app.post('/api/assessments/:id/workspace/submit', auth('student'), h(async (req:
   const submission = existing && existing.status === 'workspace'
     ? await Submission.findByIdAndUpdate(existing.id, { code_files: files, status: 'submitted' }, { new: true })
     : await Submission.create({ assessment: A.id, student: req.user.id, code_files: files, version: (existing?.version ?? 0) + 1, status: 'submitted' })
-  await prepareViva(submission, A)
   if (A.theory_enabled) {
     submission.theory_questions = await generateTheoryQuestions(submission, A)
     submission.status = 'theory_pending'
@@ -320,7 +244,6 @@ app.post('/api/assessments/:id/submissions', auth('student'), storage('submissio
     fs.unlinkSync(req.file.path)
   }
   const submission = await Submission.create({ assessment: A.id, student: req.user.id, file_id, github_url: req.body.github_url || undefined, version: (prev?.version ?? 0) + 1 })
-  await prepareViva(submission, A)
   if (A.theory_enabled) {
     submission.theory_questions = await generateTheoryQuestions(submission, A)
     submission.status = 'theory_pending'
@@ -363,14 +286,11 @@ app.put('/api/submissions/:id/evaluation', auth('admin'), h(async (req: any, res
   const theory_criteria = Array.isArray(b.theory_criteria) ? b.theory_criteria.map((c: any) => ({ ...c, score: Math.min(Math.max(Number(c.score) || 0, 0), Number(c.max) || 0) })) : []
   const theory_total = theory_criteria.reduce((t: number, c: any) => t + c.score, 0)
   const theory_max = theory_criteria.reduce((t: number, c: any) => t + Number(c.max || 0), 0)
-  const viva_criteria = Array.isArray(b.viva_criteria) ? b.viva_criteria.map((c: any) => ({ ...c, score: Math.min(Math.max(Number(c.score) || 0, 0), Number(c.max) || 0) })) : []
-  const viva_total = viva_criteria.reduce((t: number, c: any) => t + c.score, 0)
-  const viva_max = viva_criteria.reduce((t: number, c: any) => t + Number(c.max || 0), 0)
-  const total = practical_total + theory_total + viva_total
-  const max = practical_max + theory_max + viva_max
+  const total = practical_total + theory_total
+  const max = practical_max + theory_max
   const percentage = max ? total / max * 100 : 0
   const performance_level = percentage < 30 ? 'Basic' : percentage < 70 ? 'Average' : percentage < 85 ? 'Good' : 'Excellent'
-  const ev = await Evaluation.findOneAndUpdate({ submission: req.params.id }, { criteria, total, max, practical_total, practical_max, theory_criteria, theory_total, theory_max, viva_criteria, viva_total, viva_max, performance_level,
+  const ev = await Evaluation.findOneAndUpdate({ submission: req.params.id }, { criteria, total, max, practical_total, practical_max, theory_criteria, theory_total, theory_max, performance_level,
     strengths: b.strengths, weaknesses: b.weaknesses, suggestions: b.suggestions, mentor_recommendations: b.mentor_recommendations,
     summary: b.summary, status: b.publish ? 'published' : 'draft' }, { new: true })
   await Submission.findByIdAndUpdate(req.params.id, { status: b.publish ? 'published' : 'review' }); res.json(ev) }))

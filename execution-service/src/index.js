@@ -13,10 +13,11 @@ const maxOutput = 20_000
 const images = { javascript: process.env.JAVASCRIPT_RUNNER_IMAGE || 'node:22-alpine' }
 const allowedCommands = /^(node|ls|pwd|cat)(\s[\w./-]+)?$/
 const serviceToken = process.env.EXECUTION_SERVICE_TOKEN
+const activeRuns = new Map()
 app.disable('x-powered-by')
 app.use(express.json({ limit: `${maxBody}b` }))
 app.use((req, res, next) => {
-  if (serviceToken && req.path === '/execute' && req.headers.authorization !== `Bearer ${serviceToken}`) return fail(res, 401, 'Unauthorized', 'UNAUTHORIZED')
+  if (serviceToken && req.path.startsWith('/execute') && req.headers.authorization !== `Bearer ${serviceToken}`) return fail(res, 401, 'Unauthorized', 'UNAUTHORIZED')
   next()
 })
 
@@ -40,7 +41,7 @@ const validate = body => {
   return { files, entrypoint, command }
 }
 
-const runContainer = async ({ files, entrypoint, command }) => {
+const runContainer = async ({ files, entrypoint, command, executionId }) => {
   const workdir = await fs.mkdtemp(path.join(os.tmpdir(), 'codegrade-run-'))
   for (const file of files) {
     const target = path.join(workdir, file.path)
@@ -60,17 +61,19 @@ const runContainer = async ({ files, entrypoint, command }) => {
   try {
     const result = await new Promise((resolve, reject) => {
       const child = spawn('docker', args, { env: { PATH: process.env.PATH || '' } })
+      activeRuns.set(executionId, child)
       let output = ''; let error = ''; let timedOut = false
       const append = (current, chunk) => (current + chunk.toString()).slice(-maxOutput)
       child.stdout.on('data', chunk => { output = append(output, chunk) })
       child.stderr.on('data', chunk => { error = append(error, chunk) })
       const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL') }, timeoutMs)
       child.once('error', reject)
-      child.once('close', exitCode => { clearTimeout(timer); resolve({ output, error, exitCode, timedOut }) })
+      child.once('close', exitCode => { clearTimeout(timer); activeRuns.delete(executionId); resolve({ output, error, exitCode, timedOut }) })
     })
-    return { ...result, durationMs: Date.now() - started, status: result.timedOut ? 'timeout' : result.exitCode === 0 ? 'completed' : 'runtime_error' }
+    return { ...result, executionId, durationMs: Date.now() - started, status: result.timedOut ? 'timeout' : result.exitCode === 0 ? 'completed' : 'runtime_error' }
   } catch (error) {
-    return { output: '', error: error.message || 'Docker execution failed', exitCode: null, durationMs: Date.now() - started, status: 'runner_error' }
+    activeRuns.delete(executionId)
+    return { output: '', error: error.message || 'Docker execution failed', exitCode: null, durationMs: Date.now() - started, status: 'runner_error', executionId }
   } finally {
     await fs.rm(workdir, { recursive: true, force: true })
   }
@@ -80,9 +83,15 @@ app.get('/health', (_req, res) => res.json({ ok: true, service: 'codegrade-execu
 app.post('/execute', async (req, res) => {
   try {
     const input = validate(req.body)
-    res.json(await runContainer(input))
+    res.json(await runContainer({ ...input, executionId: body.executionId || crypto.randomUUID() }))
   } catch (error) {
     fail(res, 400, error.message)
   }
+})
+app.post('/execute/:id/stop', (req, res) => {
+  const child = activeRuns.get(req.params.id)
+  if (!child) return res.json({ ok: true, stopped: false })
+  child.kill('SIGKILL')
+  res.json({ ok: true, stopped: true })
 })
 app.listen(port, '0.0.0.0', () => console.log(`Execution service on :${port}`))

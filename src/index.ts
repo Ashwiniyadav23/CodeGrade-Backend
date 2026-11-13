@@ -23,6 +23,7 @@ const app = express(); app.disable('x-powered-by'); app.use(cors({
 })); app.options('*', cors()); app.use(express.json({ limit: '5mb' }))
 app.use((_req, res, next) => { res.setTimeout(180000, () => { if (!res.headersSent) res.status(504).json({ error: 'Request timed out' }) }); next() })
 const h = (fn: any) => (req: any, res: any, next: any) => Promise.resolve(fn(req, res, next)).catch(next)
+const activeExecutions = new Map<string, string>()
 const connectDatabase = async () => {
   if (mongoose.connection.readyState === 1) return
   await mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/codegrade', {
@@ -149,19 +150,33 @@ app.post('/api/assessments/:id/workspace/run', auth('student'), h(async (req: an
   const payload = JSON.stringify({ files, entrypoint: req.body.entrypoint || undefined, language: 'javascript' })
   const serviceUrl = process.env.EXECUTION_SERVICE_URL
   if (!serviceUrl) return res.status(503).json({ error: 'Secure execution is not configured. Set EXECUTION_SERVICE_URL to the isolated runner.' })
+  const executionId = `${String(req.user.id)}-${Date.now()}`
+  activeExecutions.set(String(req.user.id), executionId)
   let response: Response
   try {
-    response = await fetch(serviceUrl, { method: 'POST', headers: { 'content-type': 'application/json', ...(process.env.EXECUTION_SERVICE_TOKEN ? { authorization: `Bearer ${process.env.EXECUTION_SERVICE_TOKEN}` } : {}) }, body: payload, signal: AbortSignal.timeout(15000) })
+    response = await fetch(serviceUrl, { method: 'POST', headers: { 'content-type': 'application/json', ...(process.env.EXECUTION_SERVICE_TOKEN ? { authorization: `Bearer ${process.env.EXECUTION_SERVICE_TOKEN}` } : {}) }, body: JSON.stringify({ ...JSON.parse(payload), executionId }), signal: AbortSignal.timeout(15000) })
   } catch (error: any) {
     return res.status(502).json({ error: `Execution service unavailable: ${error.message || 'connection failed'}`, status: 'runner_unavailable' })
   }
   const body: any = await response.json().catch(() => ({}))
   if (!response.ok) return res.status(502).json({ error: body.error || 'Execution service rejected the request', status: body.status || 'runner_error' })
+  activeExecutions.delete(String(req.user.id))
   return res.json({ output: String(body.output || '').slice(0, 20000), error: String(body.error || '').slice(0, 20000), status: body.status || 'completed', exitCode: body.exitCode ?? null, durationMs: Number(body.durationMs) || 0 })
 }))
 app.post('/api/assessments/:id/workspace/stop', auth('student'), h(async (req: any, res: any) => {
   if (!await assignedAssessment(req)) return res.status(403).json({ error: 'Not assigned to you' })
-  res.status(501).json({ error: 'Stop is managed by the configured execution service.' })
+  const executionId = activeExecutions.get(String(req.user.id))
+  if (!executionId) return res.json({ ok: true, stopped: false })
+  const serviceUrl = process.env.EXECUTION_SERVICE_URL
+  if (!serviceUrl) return res.status(503).json({ error: 'Secure execution is not configured.' })
+  try {
+    const response = await fetch(`${serviceUrl.replace(/\/$/, '')}/${executionId}/stop`, { method: 'POST', headers: process.env.EXECUTION_SERVICE_TOKEN ? { authorization: `Bearer ${process.env.EXECUTION_SERVICE_TOKEN}` } : {}, signal: AbortSignal.timeout(5000) })
+    const body = await response.json().catch(() => ({}))
+    activeExecutions.delete(String(req.user.id))
+    res.status(response.ok ? 200 : 502).json(body)
+  } catch (error: any) {
+    res.status(502).json({ error: `Execution service unavailable: ${error.message || 'connection failed'}` })
+  }
 }))
 app.post('/api/assessments/:id/submissions', auth('student'), storage('submissions', true).single('file'), h(async (req: any, res: any) => {
   const fail = (code: number, error: string) => { if (req.file) fs.unlinkSync(req.file.path); return res.status(code).json({ error }) }

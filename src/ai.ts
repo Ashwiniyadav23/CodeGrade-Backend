@@ -21,7 +21,7 @@ export async function evaluateSubmission(sub: any, A: any) {
   return withAiLimit(() => evaluateSubmissionNow(sub, A))
 }
 
-async function evaluateSubmissionNow(sub: any, A: any) {
+async function submissionCode(sub: any) {
   let buf: Buffer | null = null
   if (Array.isArray(sub.code_files) && sub.code_files.length) {
     let code = ''
@@ -29,7 +29,7 @@ async function evaluateSubmissionNow(sub: any, A: any) {
       if (typeof file?.path !== 'string' || typeof file?.content !== 'string') continue
       code += `\n=== FILE: ${file.path} ===\n${file.content.slice(0, 12000)}\n`
     }
-    if (code) return evaluateSource(code, A)
+    if (code) return code
   }
   if (sub.zip_path && fs.existsSync(sub.zip_path)) buf = fs.readFileSync(sub.zip_path)
   else if (sub.file_id && mongoose.connection.db) {
@@ -62,7 +62,52 @@ async function evaluateSubmissionNow(sub: any, A: any) {
   }
   if (!code) throw new Error('No source files found in the submission.')
   if (images.length) code += `\n=== IMAGE ASSETS INCLUDED IN ZIP ===\n${images.join('\n')}\n`
-  return evaluateSource(code, A)
+  return code
+}
+
+async function evaluateSubmissionNow(sub: any, A: any) {
+  return evaluateSource(await submissionCode(sub), A)
+}
+
+const providerResponse = async (prompt: string) => {
+  const provider = (process.env.AI_PROVIDER || (process.env.GEMINI_API_KEY ? 'gemini' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : 'ollama')).toLowerCase()
+  if (provider === 'gemini' && !process.env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is not configured for AI evaluation.')
+  if (provider === 'anthropic' && !process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not configured for AI evaluation.')
+  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), Number(process.env.AI_TIMEOUT_MS || 180000))
+  try {
+    const r = provider === 'gemini'
+      ? await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_MODEL || 'gemini-2.0-flash'}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY!)}`, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ contents:[{parts:[{text:prompt}]}], generationConfig:{responseMimeType:'application/json'} }), signal:controller.signal })
+      : provider === 'anthropic'
+      ? await fetch('https://api.anthropic.com/v1/messages', { method:'POST', headers:{'x-api-key':process.env.ANTHROPIC_API_KEY!, 'anthropic-version':'2023-06-01','content-type':'application/json'}, body:JSON.stringify({ model:process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5-20250929', max_tokens:4000, messages:[{role:'user',content:prompt}]}), signal:controller.signal })
+      : await fetch(`${process.env.OLLAMA_URL || 'http://127.0.0.1:11434'}/api/generate`, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({model:process.env.OLLAMA_MODEL || 'llama3.2', prompt, stream:false, format:'json'}), signal:controller.signal })
+    const out: any = await r.json(); if (!r.ok) throw new Error(out.error?.message ?? out.message ?? 'AI request failed')
+    const text = provider === 'ollama' ? out.response ?? '' : provider === 'anthropic' ? out.content?.map((c:any)=>c.text ?? '').join('') ?? '' : out.candidates?.[0]?.content?.parts?.map((p:any)=>p.text ?? '').join('') ?? ''
+    const start = text.indexOf('{'); const end = text.lastIndexOf('}')
+    if (start < 0 || end < start) throw new Error('AI returned invalid JSON.')
+    return JSON.parse(text.slice(start, end + 1))
+  } catch (error:any) { if (error?.name === 'AbortError') throw new Error('AI evaluation timed out.'); throw error } finally { clearTimeout(timer) }
+}
+
+export async function generateTheoryQuestions(sub: any, A: any) {
+  const count = Math.min(10, Math.max(4, Number(A.theory_question_count || 5)))
+  const code = await submissionCode(sub)
+  const result = await providerResponse(`Generate exactly ${count} non-repetitive theory questions about this student's actual implementation. Test what, why, and how; reference concrete files, functions, data flow, or design choices visible in the submission. Do not invent facts or ask generic questions. Return only JSON: {"questions":[{"id":"q1","question":"..."}]}. CODE:\n${code.slice(0, 120000)}`)
+  if (!Array.isArray(result.questions) || result.questions.length !== count) throw new Error('AI returned an invalid theory question set.')
+  return result.questions.map((q:any, i:number) => ({ id: `theory-${i + 1}`, question: String(q.question || '').trim() })).filter((q:any) => q.question)
+}
+
+export async function evaluateTheory(sub: any, A: any, practical: any) {
+  const questions = sub.theory_questions || []; const answers = sub.theory_answers || []
+  const result = await providerResponse(`Evaluate each theory answer against the student's submitted code and question. Award the available marks fairly and explain errors or missing concepts. Return only JSON with exactly one result per question: {"criteria":[{"question_id":"...","score":0,"feedback":"..."}],"strengths":[],"weaknesses":[],"suggestions":[],"mentor_recommendations":"","summary":""}. Each question is worth ${Number(A.theory_marks || 30) / Math.max(1, questions.length)} marks. QUESTIONS AND ANSWERS:\n${questions.map((q:any,i:number)=>`${q.id}: ${q.question}\nANSWER: ${answers[i] || ''}`).join('\n')}\nCODE:\n${(await submissionCode(sub)).slice(0, 120000)}`)
+  const per = Number(A.theory_marks || 30) / Math.max(1, questions.length)
+  const theoryCriteria = questions.map((q:any,i:number) => { const x = result.criteria?.find((c:any)=>c.question_id === q.id) || {}; return { question_id:q.id, question:q.question, answer:answers[i] || '', max:per, score:Math.min(Math.max(Number(x.score)||0,0),per), feedback:String(x.feedback || '') } })
+  const theoryTotal = theoryCriteria.reduce((s:any,c:any)=>s+c.score,0)
+  const configuredPracticalMax = Number(A.practical_marks || practical.max || 0)
+  const practicalScale = practical.max ? configuredPracticalMax / practical.max : 1
+  const practicalCriteria = practical.criteria.map((criterion:any) => ({ ...criterion, max: criterion.max * practicalScale, score: criterion.score * practicalScale }))
+  const practicalTotal = practicalCriteria.reduce((s:any,c:any)=>s+c.score,0)
+  const total = practicalTotal + theoryTotal; const max = configuredPracticalMax + Number(A.theory_marks || 30)
+  return { ...practical, ...result, criteria: practicalCriteria, theory_criteria:theoryCriteria, theory_total:theoryTotal, theory_max:Number(A.theory_marks || 30), practical_total:practicalTotal, practical_max:configuredPracticalMax, total, max, performance_level: total/max*100 < 30 ? 'Basic' : total/max*100 < 70 ? 'Average' : total/max*100 < 85 ? 'Good' : 'Excellent' }
 }
 
 async function evaluateSource(code: string, A: any) {

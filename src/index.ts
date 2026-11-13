@@ -8,7 +8,7 @@ import multer from 'multer'
 import path from 'path'
 import fs from 'fs'
 import { User, Assessment, Assignment, Submission, Evaluation } from './models.js'
-import { evaluateSubmission } from './ai.js'
+import { evaluateSubmission, evaluateTheory, generateTheoryQuestions } from './ai.js'
 
 const SECRET = process.env.JWT_SECRET || 'dev-secret'
 const uploadRoot = process.env.VERCEL ? '/tmp/codegrade/uploads' : path.resolve('uploads')
@@ -120,7 +120,8 @@ const evaluateAndStore = async (submission: any, assessment: any) => {
   submission.status = 'evaluating'
   await submission.save()
   try {
-    const result = await evaluateSubmission(submission, assessment)
+    const practical = await evaluateSubmission(submission, assessment)
+    const result = submission.theory_submitted ? await evaluateTheory(submission, assessment, practical) : practical
     const evaluation = await Evaluation.findOneAndUpdate(
       { submission: submission.id },
       { ...result, status: 'draft' },
@@ -139,6 +140,21 @@ app.get('/api/assessments/:id/workspace', auth('student'), h(async (req: any, re
   if (!await assignedAssessment(req)) return res.status(403).json({ error: 'Not assigned to you' })
   const submission = await Submission.findOne({ assessment: req.params.id, student: req.user.id }).sort('-created_at')
   res.json({ files: submission?.code_files ?? [{ path: 'index.js', content: '// Start coding here\n' }], submitted: submission?.status === 'submitted' || submission?.status === 'review' || submission?.status === 'published' })
+}))
+app.post('/api/assessments/:id/theory', auth('student'), h(async (req: any, res: any) => {
+  const A = await assignedAssessment(req)
+  if (!A || !A.theory_enabled) return res.status(400).json({ error: 'Theory assessment is not enabled.' })
+  const submission = await Submission.findOne({ assessment: A.id, student: req.user.id }).sort('-created_at')
+  if (!submission || !submission.theory_questions?.length) return res.status(400).json({ error: 'Submit a ZIP before answering theory questions.' })
+  const answers = req.body.answers
+  if (!Array.isArray(answers) || answers.length !== submission.theory_questions.length || answers.some((answer: any) => typeof answer !== 'string' || !answer.trim())) {
+    return res.status(400).json({ error: 'Answer every theory question before submitting.' })
+  }
+  submission.theory_answers = answers.map((answer: string) => answer.trim().slice(0, 10000))
+  submission.theory_submitted = true
+  await submission.save()
+  const evaluation = await evaluateAndStore(submission, A)
+  res.json({ submission, evaluation })
 }))
 app.put('/api/assessments/:id/workspace', auth('student'), h(async (req: any, res: any) => {
   const A = await assignedAssessment(req)
@@ -162,6 +178,12 @@ app.post('/api/assessments/:id/workspace/submit', auth('student'), h(async (req:
   const submission = existing && existing.status === 'workspace'
     ? await Submission.findByIdAndUpdate(existing.id, { code_files: files, status: 'submitted' }, { new: true })
     : await Submission.create({ assessment: A.id, student: req.user.id, code_files: files, version: (existing?.version ?? 0) + 1, status: 'submitted' })
+  if (A.theory_enabled) {
+    submission.theory_questions = await generateTheoryQuestions(submission, A)
+    submission.status = 'theory_pending'
+    await submission.save()
+    return res.json({ submission, evaluation: null })
+  }
   const evaluation = await evaluateAndStore(submission, A)
   res.json({ submission, evaluation })
 }))
@@ -251,11 +273,16 @@ app.put('/api/submissions/:id/evaluation', auth('admin'), h(async (req: any, res
   const b = req.body
   if (!Array.isArray(b.criteria)) return res.status(400).json({ error: 'Evaluation criteria are required' })
   const criteria = b.criteria.map((c: any) => ({ ...c, score: Math.min(Math.max(Number(c.score) || 0, 0), Number(c.max) || 0) }))
-  const total = criteria.reduce((t: number, c: any) => t + c.score, 0)
-  const max = criteria.reduce((t: number, c: any) => t + Number(c.max || 0), 0)
+  const practical_total = criteria.reduce((t: number, c: any) => t + c.score, 0)
+  const practical_max = criteria.reduce((t: number, c: any) => t + Number(c.max || 0), 0)
+  const theory_criteria = Array.isArray(b.theory_criteria) ? b.theory_criteria.map((c: any) => ({ ...c, score: Math.min(Math.max(Number(c.score) || 0, 0), Number(c.max) || 0) })) : []
+  const theory_total = theory_criteria.reduce((t: number, c: any) => t + c.score, 0)
+  const theory_max = theory_criteria.reduce((t: number, c: any) => t + Number(c.max || 0), 0)
+  const total = practical_total + theory_total
+  const max = practical_max + theory_max
   const percentage = max ? total / max * 100 : 0
   const performance_level = percentage < 30 ? 'Basic' : percentage < 70 ? 'Average' : percentage < 85 ? 'Good' : 'Excellent'
-  const ev = await Evaluation.findOneAndUpdate({ submission: req.params.id }, { criteria, total, max, performance_level,
+  const ev = await Evaluation.findOneAndUpdate({ submission: req.params.id }, { criteria, total, max, practical_total, practical_max, theory_criteria, theory_total, theory_max, performance_level,
     strengths: b.strengths, weaknesses: b.weaknesses, suggestions: b.suggestions, mentor_recommendations: b.mentor_recommendations,
     summary: b.summary, status: b.publish ? 'published' : 'draft' }, { new: true })
   await Submission.findByIdAndUpdate(req.params.id, { status: b.publish ? 'published' : 'review' }); res.json(ev) }))

@@ -147,14 +147,14 @@ app.post('/api/assessments/:id/workspace/submit', auth('student'), h(async (req:
 app.post('/api/assessments/:id/workspace/run', auth('student'), h(async (req: any, res: any) => {
   if (!await assignedAssessment(req)) return res.status(403).json({ error: 'Not assigned to you' })
   const files = validateCodeFiles(req.body.files)
-  const payload = JSON.stringify({ files, entrypoint: req.body.entrypoint || undefined, language: 'javascript' })
+  const payload = JSON.stringify({ files, entrypoint: req.body.entrypoint || undefined, command: req.body.command || undefined, language: 'javascript' })
   const serviceUrl = process.env.EXECUTION_SERVICE_URL
   if (!serviceUrl) return res.status(503).json({ error: 'Secure execution is not configured. Set EXECUTION_SERVICE_URL to the isolated runner.' })
   const executionId = `${String(req.user.id)}-${Date.now()}`
   activeExecutions.set(String(req.user.id), executionId)
   let response: Response
   try {
-    response = await fetch(serviceUrl, { method: 'POST', headers: { 'content-type': 'application/json', ...(process.env.EXECUTION_SERVICE_TOKEN ? { authorization: `Bearer ${process.env.EXECUTION_SERVICE_TOKEN}` } : {}) }, body: JSON.stringify({ ...JSON.parse(payload), executionId }), signal: AbortSignal.timeout(15000) })
+    response = await fetch(serviceUrl, { method: 'POST', headers: { 'content-type': 'application/json', ...(process.env.EXECUTION_SERVICE_TOKEN ? { authorization: `Bearer ${process.env.EXECUTION_SERVICE_TOKEN}` } : {}) }, body: JSON.stringify({ ...JSON.parse(payload), executionId }), signal: AbortSignal.timeout(45000) })
   } catch (error: any) {
     return res.status(502).json({ error: `Execution service unavailable: ${error.message || 'connection failed'}`, status: 'runner_unavailable' })
   }

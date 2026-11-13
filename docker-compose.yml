@@ -1,0 +1,13 @@
+services:
+  execution-service:
+    build:
+      context: ./execution-service
+    environment:
+      PORT: 4001
+      EXECUTION_TIMEOUT_MS: 10000
+      EXECUTION_SERVICE_TOKEN: ${EXECUTION_SERVICE_TOKEN:-}
+    ports:
+      - "4001:4001"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped

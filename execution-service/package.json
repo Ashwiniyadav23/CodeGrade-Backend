@@ -1,0 +1,11 @@
+{
+  "name": "codegrade-execution-service",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

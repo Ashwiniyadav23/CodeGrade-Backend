@@ -7,7 +7,6 @@ import jwt from 'jsonwebtoken'
 import multer from 'multer'
 import path from 'path'
 import fs from 'fs'
-import { spawn } from 'child_process'
 import { User, Assessment, Assignment, Submission, Evaluation } from './models.js'
 import { evaluateSubmission } from './ai.js'
 
@@ -24,7 +23,6 @@ const app = express(); app.disable('x-powered-by'); app.use(cors({
 })); app.options('*', cors()); app.use(express.json({ limit: '5mb' }))
 app.use((_req, res, next) => { res.setTimeout(180000, () => { if (!res.headersSent) res.status(504).json({ error: 'Request timed out' }) }); next() })
 const h = (fn: any) => (req: any, res: any, next: any) => Promise.resolve(fn(req, res, next)).catch(next)
-const activeDockerRuns = new Map<string, any>()
 const connectDatabase = async () => {
   if (mongoose.connection.readyState === 1) return
   await mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/codegrade', {
@@ -150,38 +148,20 @@ app.post('/api/assessments/:id/workspace/run', auth('student'), h(async (req: an
   const files = validateCodeFiles(req.body.files)
   const payload = JSON.stringify({ files, entrypoint: req.body.entrypoint || undefined, language: 'javascript' })
   const serviceUrl = process.env.EXECUTION_SERVICE_URL
-  if (serviceUrl) {
-    const response = await fetch(serviceUrl, { method: 'POST', headers: { 'content-type': 'application/json', ...(process.env.EXECUTION_SERVICE_TOKEN ? { authorization: `Bearer ${process.env.EXECUTION_SERVICE_TOKEN}` } : {}) }, body: payload, signal: AbortSignal.timeout(15000) })
-    const body: any = await response.json().catch(() => ({}))
-    if (!response.ok) return res.status(502).json({ error: body.error || 'Execution service failed' })
-    return res.json({ output: String(body.output || '').slice(0, 20000), error: String(body.error || '').slice(0, 20000), exitCode: body.exitCode ?? null })
-  }
-  if (process.env.NODE_ENV === 'production' || process.env.RENDER) return res.status(503).json({ error: 'Secure execution is not configured. Set EXECUTION_SERVICE_URL to an isolated runner.' })
+  if (!serviceUrl) return res.status(503).json({ error: 'Secure execution is not configured. Set EXECUTION_SERVICE_URL to the isolated runner.' })
+  let response: Response
   try {
-    const requestedCommand = String(req.body.command || '').trim()
-    const safeCommand = requestedCommand && /^(node|ls|pwd|cat)\\s?[\\w./-]*$/.test(requestedCommand) ? requestedCommand : ''
-    const runner = `const fs=require('fs'),path=require('path'),cp=require('child_process');const d=JSON.parse(fs.readFileSync(0,'utf8'));for(const f of d.files){const p=path.join('/workspace',f.path);fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,f.content)};const e=d.entrypoint||d.files.find(f=>/\\.(js|mjs|cjs)$/.test(f.path))?.path;const c=${JSON.stringify(safeCommand)}||('node '+e);const p=cp.spawnSync('/bin/sh',['-c',c.replace(/(^| )([\\w./-]+\\.js)(?= |$)/g,'$1/workspace/$2')],{cwd:'/workspace',timeout:10000,encoding:'utf8'});process.stdout.write(p.stdout||'');process.stderr.write(p.stderr||'');process.exit(p.status||0);`
-    const result = await new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve, reject) => {
-      const child = spawn('docker', ['run', '--rm', '--network', 'none', '--cpus', '0.5', '--memory', '256m', '--pids-limit', '64', '--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m', '-i', 'node:22-alpine', 'node', '-e', runner])
-      activeDockerRuns.set(String(req.user.id), child)
-      let stdout = ''; let stderr = ''
-      child.stdout.on('data', chunk => { stdout += chunk.toString() })
-      child.stderr.on('data', chunk => { stderr += chunk.toString() })
-      child.once('error', reject)
-      child.once('close', code => { activeDockerRuns.delete(String(req.user.id)); resolve({ stdout: stdout.slice(0, 20000), stderr: stderr.slice(0, 20000), code }) })
-      child.stdin.end(payload)
-      setTimeout(() => child.kill('SIGKILL'), 12000)
-    })
-    res.json({ output: result.stdout, error: result.stderr, exitCode: result.code ?? 1 })
+    response = await fetch(serviceUrl, { method: 'POST', headers: { 'content-type': 'application/json', ...(process.env.EXECUTION_SERVICE_TOKEN ? { authorization: `Bearer ${process.env.EXECUTION_SERVICE_TOKEN}` } : {}) }, body: payload, signal: AbortSignal.timeout(15000) })
   } catch (error: any) {
-    res.json({ output: error.stdout || '', error: error.stderr || error.message || 'Execution failed', exitCode: error.code ?? 1 })
+    return res.status(502).json({ error: `Execution service unavailable: ${error.message || 'connection failed'}`, status: 'runner_unavailable' })
   }
+  const body: any = await response.json().catch(() => ({}))
+  if (!response.ok) return res.status(502).json({ error: body.error || 'Execution service rejected the request', status: body.status || 'runner_error' })
+  return res.json({ output: String(body.output || '').slice(0, 20000), error: String(body.error || '').slice(0, 20000), status: body.status || 'completed', exitCode: body.exitCode ?? null, durationMs: Number(body.durationMs) || 0 })
 }))
 app.post('/api/assessments/:id/workspace/stop', auth('student'), h(async (req: any, res: any) => {
   if (!await assignedAssessment(req)) return res.status(403).json({ error: 'Not assigned to you' })
-  const child = activeDockerRuns.get(String(req.user.id))
-  if (child) child.kill('SIGKILL')
-  res.json({ ok: true, stopped: !!child })
+  res.status(501).json({ error: 'Stop is managed by the configured execution service.' })
 }))
 app.post('/api/assessments/:id/submissions', auth('student'), storage('submissions', true).single('file'), h(async (req: any, res: any) => {
   const fail = (code: number, error: string) => { if (req.file) fs.unlinkSync(req.file.path); return res.status(code).json({ error }) }

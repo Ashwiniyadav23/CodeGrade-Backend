@@ -115,6 +115,26 @@ const assignedAssessment = async (req: any) => {
   if (!A || !(await Assignment.findOne({ assessment: A.id, student: req.user.id }))) return null
   return A
 }
+const evaluateAndStore = async (submission: any, assessment: any) => {
+  if (!assessment.rubric.length) return null
+  submission.status = 'evaluating'
+  await submission.save()
+  try {
+    const result = await evaluateSubmission(submission, assessment)
+    const evaluation = await Evaluation.findOneAndUpdate(
+      { submission: submission.id },
+      { ...result, status: 'draft' },
+      { upsert: true, new: true },
+    )
+    submission.status = 'review'
+    await submission.save()
+    return evaluation
+  } catch (error) {
+    submission.status = 'submitted'
+    await submission.save()
+    throw error
+  }
+}
 app.get('/api/assessments/:id/workspace', auth('student'), h(async (req: any, res: any) => {
   if (!await assignedAssessment(req)) return res.status(403).json({ error: 'Not assigned to you' })
   const submission = await Submission.findOne({ assessment: req.params.id, student: req.user.id }).sort('-created_at')
@@ -142,7 +162,8 @@ app.post('/api/assessments/:id/workspace/submit', auth('student'), h(async (req:
   const submission = existing && existing.status === 'workspace'
     ? await Submission.findByIdAndUpdate(existing.id, { code_files: files, status: 'submitted' }, { new: true })
     : await Submission.create({ assessment: A.id, student: req.user.id, code_files: files, version: (existing?.version ?? 0) + 1, status: 'submitted' })
-  res.json(submission)
+  const evaluation = await evaluateAndStore(submission, A)
+  res.json({ submission, evaluation })
 }))
 app.post('/api/assessments/:id/workspace/run', auth('student'), h(async (req: any, res: any) => {
   if (!await assignedAssessment(req)) return res.status(403).json({ error: 'Not assigned to you' })
@@ -198,7 +219,10 @@ app.post('/api/assessments/:id/submissions', auth('student'), storage('submissio
     file_id = upload.id
     fs.unlinkSync(req.file.path)
   }
-  res.json(await Submission.create({ assessment: A.id, student: req.user.id, file_id, github_url: req.body.github_url || undefined, version: (prev?.version ?? 0) + 1 })) }))
+  const submission = await Submission.create({ assessment: A.id, student: req.user.id, file_id, github_url: req.body.github_url || undefined, version: (prev?.version ?? 0) + 1 })
+  const evaluation = await evaluateAndStore(submission, A)
+  res.json({ submission, evaluation })
+}))
 
 // ---------- Admin: submissions, AI evaluation, publishing ----------
 app.get('/api/submissions', auth('admin'), h(async (_q: any, res: any) => {
@@ -221,10 +245,8 @@ app.get('/api/submissions/:id/download', auth('admin'), h(async (req: any, res: 
 app.post('/api/submissions/:id/evaluate', auth('admin'), h(async (req: any, res: any) => {
   const s = await Submission.findById(req.params.id); const A = await Assessment.findById(s!.assessment)
   if (!A!.rubric.length) return res.status(400).json({ error: 'Add rubric criteria to this assessment first' })
-  s!.status = 'evaluating'; await s!.save()
-  try { const r = await evaluateSubmission(s, A)
-    await Evaluation.findOneAndUpdate({ submission: s!.id }, { ...r, status: 'draft' }, { upsert: true }); s!.status = 'review'; await s!.save(); res.json({ ok: true })
-  } catch (e: any) { s!.status = 'submitted'; await s!.save(); res.status(500).json({ error: e.message }) } }))
+  try { await evaluateAndStore(s, A); res.json({ ok: true })
+  } catch (e: any) { res.status(500).json({ error: e.message }) } }))
 app.put('/api/submissions/:id/evaluation', auth('admin'), h(async (req: any, res: any) => {
   const b = req.body
   if (!Array.isArray(b.criteria)) return res.status(400).json({ error: 'Evaluation criteria are required' })

@@ -6,7 +6,6 @@ services:
       PORT: 4001
       EXECUTION_TIMEOUT_MS: 10000
       EXECUTION_SERVICE_TOKEN: ${EXECUTION_SERVICE_TOKEN:-}
-      EXECUTION_ALLOWED_PACKAGES: ${EXECUTION_ALLOWED_PACKAGES:-express,mongoose,bcryptjs,jsonwebtoken,cors,multer,dotenv}
     ports:
       - "4001:4001"
     volumes:

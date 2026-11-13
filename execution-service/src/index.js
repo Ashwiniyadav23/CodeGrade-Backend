@@ -11,10 +11,9 @@ const maxBody = 1_000_000
 const timeoutMs = Number(process.env.EXECUTION_TIMEOUT_MS || 10_000)
 const maxOutput = 20_000
 const images = { javascript: process.env.JAVASCRIPT_RUNNER_IMAGE || 'node:22-alpine' }
-const allowedCommands = /^(node|npm|ls|pwd|cat)(\s[\w@./-]+)*$/
+const allowedCommands = /^(node|ls|pwd|cat)(\s[\w@./-]+)*$|^npm\s+(install|i)$/
 const serviceToken = process.env.EXECUTION_SERVICE_TOKEN
 const activeRuns = new Map()
-const allowedPackages = new Set((process.env.EXECUTION_ALLOWED_PACKAGES || 'express,mongoose,bcryptjs,jsonwebtoken,cors,multer,dotenv').split(',').map(value => value.trim()).filter(Boolean))
 app.disable('x-powered-by')
 app.use(express.json({ limit: `${maxBody}b` }))
 app.use((req, res, next) => {
@@ -37,7 +36,7 @@ const validate = body => {
   const entrypoint = String(body.entrypoint || files.find(file => /\.(js|mjs|cjs)$/.test(file.path))?.path || '')
   if (!entrypoint || !files.some(file => file.path === entrypoint)) throw new Error('A JavaScript entrypoint is required.')
   const command = String(body.command || '').trim()
-  if (command && (!allowedCommands.test(command) || /(^|\s)(npm\s+(uninstall|update|run|exec|link|root)|node\s+--require|cat\s+\/)/.test(command))) throw new Error('Only node, npm install, npm start, ls, pwd, and cat project-file commands are permitted.')
+  if (command && (!allowedCommands.test(command) || /(^|\s)(node\s+--require|cat\s+\/)/.test(command))) throw new Error('Only node, npm install, ls, pwd, and cat project-file commands are permitted.')
   if (body.dependencies && (typeof body.dependencies !== 'object' || Array.isArray(body.dependencies))) throw new Error('Dependencies must be an object.')
   return { files, entrypoint, command }
 }
@@ -63,12 +62,12 @@ const runContainer = async ({ files, entrypoint, command, executionId }) => {
     try { dependencies = { ...(JSON.parse(manifest.content).dependencies || {}), ...(JSON.parse(manifest.content).devDependencies || {}) } } catch { throw new Error('package.json is not valid JSON.') }
   }
   const requestedPackages = Object.keys(dependencies)
-  const disallowed = requestedPackages.filter(name => !allowedPackages.has(name))
-  if (disallowed.length) throw new Error(`Dependencies not permitted: ${disallowed.join(', ')}. Add them to EXECUTION_ALLOWED_PACKAGES.`)
-  const invalidVersions = requestedPackages.filter(name => typeof dependencies[name] !== 'string' || !/^[~^]?\d+(\.\d+){0,2}([-+][0-9A-Za-z.-]+)?$/.test(dependencies[name]))
-  if (invalidVersions.length) throw new Error(`Dependencies must use pinned numeric versions: ${invalidVersions.join(', ')}`)
+  const invalidPackages = requestedPackages.filter(name => !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(name))
+  if (invalidPackages.length) throw new Error(`Only npm registry package names are permitted: ${invalidPackages.join(', ')}`)
+  const invalidVersions = requestedPackages.filter(name => typeof dependencies[name] !== 'string' || !dependencies[name].trim() || /^(?:file:|link:|git\+|git:|https?:|ssh:|github:|workspace:|npm:)/i.test(dependencies[name]) || /[\s"'`]/.test(dependencies[name]))
+  if (invalidVersions.length) throw new Error(`Dependencies must use npm registry versions or ranges: ${invalidVersions.join(', ')}`)
   const filesPayload = JSON.stringify({ files })
-  const setupScript = `const fs=require('fs'),path=require('path'),d=JSON.parse(fs.readFileSync(0,'utf8'));for(const f of d.files){const p=path.join('/workspace',f.path);fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,f.content)};${requestedPackages.length ? "require('child_process').execFileSync('npm',['install','--ignore-scripts','--no-audit','--no-fund','--package-lock=false'],{cwd:'/workspace',stdio:'inherit'})" : ''}`
+  const setupScript = `const fs=require('fs'),path=require('path'),d=JSON.parse(fs.readFileSync(0,'utf8'));for(const f of d.files){const p=path.join('/workspace',f.path);fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,f.content)};${requestedPackages.length ? "require('child_process').execFileSync('npm',['install','--ignore-scripts','--no-audit','--no-fund','--package-lock=false','--registry=https://registry.npmjs.org'],{cwd:'/workspace',stdio:'inherit'})" : ''}`
   const args = [
     'run', '--rm', '--network', 'bridge', '--cpus', '0.5', '--memory', '256m',
     '--pids-limit', '64', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',

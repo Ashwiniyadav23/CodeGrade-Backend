@@ -272,6 +272,18 @@ app.get('/api/submissions/:id/download', auth('admin'), h(async (req: any, res: 
   res.setHeader('Content-Disposition', 'attachment; filename="submission.zip"')
   bucket.openDownloadStream(s.file_id).on('error', () => { if (!res.headersSent) res.status(404).json({ error: 'No file' }) }).pipe(res)
 }))
+app.delete('/api/submissions/:id', auth('admin'), h(async (req: any, res: any) => {
+  const submission = await Submission.findById(req.params.id)
+  if (!submission) return res.status(404).json({ error: 'Submission not found' })
+  if (submission.zip_path && fs.existsSync(submission.zip_path)) fs.unlinkSync(submission.zip_path)
+  if (submission.file_id && mongoose.connection.db) {
+    const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'submissions' })
+    await bucket.delete(submission.file_id).catch(() => undefined)
+  }
+  await Evaluation.deleteOne({ submission: submission.id })
+  await Submission.deleteOne({ _id: submission.id })
+  res.json({ ok: true })
+}))
 app.post('/api/submissions/:id/evaluate', auth('admin'), h(async (req: any, res: any) => {
   const s = await Submission.findById(req.params.id); const A = await Assessment.findById(s!.assessment)
   if (!A!.rubric.length) return res.status(400).json({ error: 'Add rubric criteria to this assessment first' })

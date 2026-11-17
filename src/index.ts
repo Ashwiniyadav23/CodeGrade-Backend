@@ -89,7 +89,7 @@ app.use((_req, res, next) => {
 
 
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, database: mongoose.connection.readyState === 1 }))
+app.get('/api/health', (_req, res) => res.json({ ok: true, database: mongoose.connection.readyState === 1, version: 'cd9b803' }))
 
 // Helper wrappers
 const h = (fn: any) => async (req: any, res: any, next: any) => {

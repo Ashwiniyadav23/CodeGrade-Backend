@@ -414,7 +414,7 @@ app.post('/api/assessments/:id/submissions', auth('student'), storage('submissio
 
   const evaluation = await evaluateAndStore(submission, A)
   res.json({ submission, evaluation })
-})
+}))
 
 // Admin submissions, evaluations
 app.get('/api/submissions', auth('admin'), h(async (_q: any, res: any) => {

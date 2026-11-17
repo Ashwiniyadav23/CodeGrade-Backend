@@ -122,26 +122,54 @@ export const providerResponse = async (prompt: string) => {
   if (!['gemini', 'anthropic', 'ollama'].includes(provider)) throw new Error(`Unsupported AI_PROVIDER "${provider}".`)
   if (provider === 'gemini' && !process.env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is not configured for AI evaluation.')
   if (provider === 'anthropic' && !process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not configured for AI evaluation.')
-  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), Number(process.env.AI_TIMEOUT_MS || 180000))
-  try {
-    const r = provider === 'gemini'
-      ? await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_MODEL || 'gemini-2.0-flash'}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY!)}`, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ contents:[{parts:[{text:prompt}]}], generationConfig:{responseMimeType:'application/json'} }), signal:controller.signal })
-      : provider === 'anthropic'
-      ? await fetch('https://api.anthropic.com/v1/messages', { method:'POST', headers:{'x-api-key':process.env.ANTHROPIC_API_KEY!, 'anthropic-version':'2023-06-01','content-type':'application/json'}, body:JSON.stringify({ model:process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5-20250929', max_tokens:4000, messages:[{role:'user',content:prompt}]}), signal:controller.signal })
-      : await fetch(`${process.env.OLLAMA_URL || 'http://127.0.0.1:11434'}/api/generate`, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({model:process.env.OLLAMA_MODEL || 'llama3.2', prompt, stream:false, format:'json'}), signal:controller.signal })
-    const out: any = await r.json()
+  const maxAttempts = Math.min(5, Math.max(1, Number(process.env.AI_RETRY_ATTEMPTS || 4)))
+  let geminiModel = process.env.GEMINI_MODEL || 'gemini-3.8-flash'
+  const geminiFallbackModel = process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.6-flash'
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), Number(process.env.AI_TIMEOUT_MS || 180000))
+    let r: Response
+    try {
+      r = provider === 'gemini'
+        ? await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY!)}`, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ contents:[{parts:[{text:prompt}]}], generationConfig:{responseMimeType:'application/json'} }), signal:controller.signal })
+        : provider === 'anthropic'
+        ? await fetch('https://api.anthropic.com/v1/messages', { method:'POST', headers:{'x-api-key':process.env.ANTHROPIC_API_KEY!, 'anthropic-version':'2023-06-01','content-type':'application/json'}, body:JSON.stringify({ model:process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5-20250929', max_tokens:4000, messages:[{role:'user',content:prompt}]}), signal:controller.signal })
+        : await fetch(`${process.env.OLLAMA_URL || 'http://127.0.0.1:11434'}/api/generate`, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({model:process.env.OLLAMA_MODEL || 'llama3.2', prompt, stream:false, format:'json'}), signal:controller.signal })
+    } catch (error: any) {
+      if (error?.name === 'AbortError') throw new Error('AI evaluation timed out.')
+      if (attempt === maxAttempts) throw new Error(`Could not connect to the ${provider} AI provider: ${error?.message || 'network request failed'}`)
+      await new Promise(resolve => setTimeout(resolve, Math.min(1000 * (2 ** (attempt - 1)), 5000)))
+      continue
+    } finally {
+      clearTimeout(timer)
+    }
+
+    const out: any = await r.json().catch(() => ({}))
     if (!r.ok) {
       const msg: string = out.error?.message ?? out.message ?? 'AI request failed'
-      if (r.status === 429 || msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('rate')) {
-        throw new Error('AI quota exceeded. The free-tier daily limit has been reached. Please try again later or ask your admin to upgrade the AI plan. (Tip: switch GEMINI_MODEL to gemini-2.0-flash for a higher free quota.)')
+      const lowerMsg = msg.toLowerCase()
+      const quotaFailure = lowerMsg.includes('quota') || lowerMsg.includes('daily limit') || lowerMsg.includes('billing')
+      const modelUnavailable = provider === 'gemini' && [404, 410].includes(r.status)
+      const temporaryFailure = [408, 425, 429, 500, 502, 503, 504, 529].includes(r.status)
+        || lowerMsg.includes('high demand') || lowerMsg.includes('overloaded') || lowerMsg.includes('temporarily unavailable')
+      if (!quotaFailure && (temporaryFailure || modelUnavailable) && provider === 'gemini' && geminiModel !== geminiFallbackModel) {
+        console.warn(`Gemini model ${geminiModel} is unavailable (${r.status}); retrying with ${geminiFallbackModel}.`)
+        geminiModel = geminiFallbackModel
+        continue
       }
-      throw new Error(msg)
+      if (temporaryFailure && !quotaFailure && attempt < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, Math.min(1000 * (2 ** (attempt - 1)), 5000)))
+        continue
+      }
+      if (quotaFailure) throw new Error('AI quota exceeded. Please try again later or ask your admin to configure another AI provider.')
+      throw new Error(temporaryFailure ? `AI provider is still overloaded after ${attempt} attempts. Please retry shortly.` : msg)
     }
     const text = provider === 'ollama' ? out.response ?? '' : provider === 'anthropic' ? out.content?.map((c:any)=>c.text ?? '').join('') ?? '' : out.candidates?.[0]?.content?.parts?.map((p:any)=>p.text ?? '').join('') ?? ''
     const start = text.indexOf('{'); const end = text.lastIndexOf('}')
     if (start < 0 || end < start) throw new Error('AI returned invalid JSON.')
     return JSON.parse(text.slice(start, end + 1))
-  } catch (error:any) { if (error?.name === 'AbortError') throw new Error('AI evaluation timed out.'); throw error } finally { clearTimeout(timer) }
+  }
+  throw new Error('AI provider is temporarily unavailable. Please retry shortly.')
 }
 
 export async function generateTheoryQuestions(sub: any, A: any) {

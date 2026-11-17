@@ -441,7 +441,7 @@ app.post('/api/assessments/:id/submissions', auth('student'), storage('submissio
     // Evaluation is asynchronous in practice; an AI outage must not turn a
     // successfully stored submission into an apparent upload failure.
     console.error('Automatic evaluation failed after submission was saved:', error)
-    return res.json({ submission, evaluation: null, warning: 'Your submission was received, but automatic evaluation is temporarily unavailable. Your instructor can review it.' })
+    return res.json({ submission, evaluation: null, warning: `Your submission was received, but automatic evaluation could not finish: ${error.message || 'the AI provider is unavailable'}. Your instructor can retry.` })
   }
 }))
 

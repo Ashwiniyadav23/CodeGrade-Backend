@@ -32,6 +32,11 @@ async function submissionCode(sub: any) {
     if (code) return code
   }
   if (sub.zip_path && fs.existsSync(sub.zip_path)) buf = fs.readFileSync(sub.zip_path)
+  else if (sub.cloudinary_url) {
+    // Download ZIP from Cloudinary
+    const r = await fetch(sub.cloudinary_url)
+    if (r.ok) buf = Buffer.from(await r.arrayBuffer())
+  }
   else if (sub.file_id && mongoose.connection.db) {
     const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'submissions' })
     buf = await new Promise<Buffer>((resolve, reject) => {

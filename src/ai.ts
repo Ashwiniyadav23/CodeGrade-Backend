@@ -21,6 +21,22 @@ export async function evaluateSubmission(sub: any, A: any) {
   return withAiLimit(() => evaluateSubmissionNow(sub, A))
 }
 
+// Persist the source files extracted from uploaded ZIPs with the submission.
+// Evaluation then uses MongoDB data directly instead of depending on a later
+// Cloudinary download from a short-lived server process.
+export function extractSubmissionFiles(buffer: Buffer) {
+  const files: Array<{ path: string; content: string }> = []
+  let total = 0
+  for (const entry of new AdmZip(buffer).getEntries()) {
+    if (entry.isDirectory || SKIP.test(entry.entryName) || !EXT.test(entry.entryName)) continue
+    const content = entry.getData().toString('utf8').slice(0, 12000)
+    if (total + content.length > 120000) break
+    files.push({ path: entry.entryName, content })
+    total += content.length
+  }
+  return files
+}
+
 async function submissionCode(sub: any) {
   let buf: Buffer | null = null
   if (Array.isArray(sub.code_files) && sub.code_files.length) {

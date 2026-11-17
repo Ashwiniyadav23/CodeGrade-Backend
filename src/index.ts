@@ -9,7 +9,7 @@ import path from 'path'
 import fs from 'fs'
 import { v2 as cloudinary } from 'cloudinary'
 import { User, Assessment, Assignment, Submission, Evaluation } from './models.js'
-import { evaluateSubmission, evaluateTheory, generateTheoryQuestions } from './ai.js'
+import { evaluateSubmission, evaluateTheory, extractSubmissionFiles, generateTheoryQuestions } from './ai.js'
 
 const SECRET = process.env.JWT_SECRET || 'dev-secret'
 const uploadRoot = '/tmp/codegrade/uploads'
@@ -356,7 +356,13 @@ app.post('/api/assessments/:id/workspace/stop', auth('student'), h(async (req: a
 // Updated submission endpoint – accepts a ZIP file (field "file") OR a GitHub URL (field "github_url").
 // Additionally, if a base64‑encoded ZIP is sent in "fileBase64", we decode it on‑the‑fly.
 app.post('/api/assessments/:id/submissions', auth('student'), storage('submissions', true).single('file'), h(async (req: any, res: any) => {
-  const fail = (code: number, err: string) => { if (req.file) fs.unlinkSync(req.file.path); return res.status(code).json({ error: err }) }
+  let tempPath: string | undefined
+  const fail = (code: number, err: string) => {
+    for (const filePath of new Set([req.file?.path, tempPath].filter(Boolean))) {
+      if (fs.existsSync(filePath!)) fs.unlinkSync(filePath!)
+    }
+    return res.status(code).json({ error: err })
+  }
 
   const A = await Assessment.findById(req.params.id)
   if (!A || !(await Assignment.findOne({ assessment: A.id, student: req.user.id }))) return fail(403, 'Not assigned to you')
@@ -375,7 +381,6 @@ app.post('/api/assessments/:id/submissions', auth('student'), storage('submissio
   }
 
   // ---- Handle base64 ZIP (decode to a temporary file) ----
-  let tempPath: string | undefined
   if (!hasFile && hasBase64) {
     const buffer = Buffer.from(req.body.fileBase64, 'base64')
     // Write to a temporary location inside the uploads folder
@@ -386,14 +391,21 @@ app.post('/api/assessments/:id/submissions', auth('student'), storage('submissio
 
   // ---- Upload to Cloudinary if we have a file (multipart or decoded) ----
   let cloudinary_url: string | undefined
+  let code_files: Array<{ path: string; content: string }> = []
   if (hasFile || tempPath) {
     const filePath = hasFile ? req.file.path : tempPath!
     const publicId = `codegrade/submissions/${req.user.id}-${Date.now()}`
     try {
+      try {
+        code_files = extractSubmissionFiles(fs.readFileSync(filePath))
+      } catch {
+        return fail(400, 'The uploaded file is not a valid ZIP archive.')
+      }
+      if (!code_files.length) return fail(400, 'The ZIP contains no supported source files to evaluate.')
       cloudinary_url = await uploadToCloudinary(filePath, 'codegrade/submissions', publicId)
     } finally {
       // Clean up the temporary file in both cases
-      fs.unlinkSync(filePath)
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
     }
   }
 
@@ -401,6 +413,7 @@ app.post('/api/assessments/:id/submissions', auth('student'), storage('submissio
     assessment: A.id,
     student: req.user.id,
     cloudinary_url,
+    code_files,
     github_url: hasGitUrl ? req.body.github_url : undefined,
     version: (prev?.version ?? 0) + 1,
   })

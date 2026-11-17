@@ -406,14 +406,30 @@ app.post('/api/assessments/:id/submissions', auth('student'), storage('submissio
   })
 
   if (A.theory_enabled) {
-    submission.theory_questions = await generateTheoryQuestions(submission, A)
-    submission.status = 'theory_pending'
-    await submission.save()
-    return res.json({ submission, evaluation: null })
+    try {
+      submission.theory_questions = await generateTheoryQuestions(submission, A)
+      submission.status = 'theory_pending'
+      await submission.save()
+      return res.json({ submission, evaluation: null })
+    } catch (error: any) {
+      // The upload is already stored. Keep it and report the AI failure without
+      // making the client think the submission itself was rejected.
+      submission.status = 'submitted'
+      await submission.save()
+      console.error('Theory question generation failed after submission was saved:', error)
+      return res.json({ submission, evaluation: null, warning: 'Your submission was received, but theory questions could not be generated. Please contact your instructor.' })
+    }
   }
 
-  const evaluation = await evaluateAndStore(submission, A)
-  res.json({ submission, evaluation })
+  try {
+    const evaluation = await evaluateAndStore(submission, A)
+    return res.json({ submission, evaluation })
+  } catch (error: any) {
+    // Evaluation is asynchronous in practice; an AI outage must not turn a
+    // successfully stored submission into an apparent upload failure.
+    console.error('Automatic evaluation failed after submission was saved:', error)
+    return res.json({ submission, evaluation: null, warning: 'Your submission was received, but automatic evaluation is temporarily unavailable. Your instructor can review it.' })
+  }
 }))
 
 // Admin submissions, evaluations

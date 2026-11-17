@@ -7,13 +7,38 @@ import jwt from 'jsonwebtoken'
 import multer from 'multer'
 import path from 'path'
 import fs from 'fs'
+import { v2 as cloudinary } from 'cloudinary'
 import { User, Assessment, Assignment, Submission, Evaluation } from './models.js'
 import { evaluateSubmission, evaluateTheory, generateTheoryQuestions } from './ai.js'
 
 const SECRET = process.env.JWT_SECRET || 'dev-secret'
-const uploadRoot = process.env.VERCEL ? '/tmp/codegrade/uploads' : path.resolve('uploads')
+const uploadRoot = '/tmp/codegrade/uploads'
 fs.mkdirSync(path.join(uploadRoot, 'starters'), { recursive: true })
 fs.mkdirSync(path.join(uploadRoot, 'submissions'), { recursive: true })
+
+// Configure Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+})
+
+const uploadToCloudinary = (filePath: string, folder: string, publicId: string): Promise<string> =>
+  new Promise((resolve, reject) =>
+    cloudinary.uploader.upload(filePath, { resource_type: 'raw', folder, public_id: publicId, overwrite: true },
+      (err, result) => err ? reject(err) : resolve(result!.secure_url)))
+
+const deleteFromCloudinary = async (cloudinaryUrl: string) => {
+  try {
+    // Extract public_id from URL: everything after /upload/ and before the file extension
+    const match = cloudinaryUrl.match(/\/upload\/(?:v\d+\/)?(.+)$/)
+    if (match) {
+      const publicIdWithExt = match[1]
+      const publicId = publicIdWithExt.replace(/\.[^/.]+$/, '')
+      await cloudinary.uploader.destroy(publicId, { resource_type: 'raw' })
+    }
+  } catch (e) { /* ignore cleanup errors */ }
+}
 const frontendOrigins = (process.env.FRONTEND_ORIGIN || 'http://localhost:5173,http://localhost:5174,http://localhost:5175')
   .split(',').map(origin => origin.trim()).filter(Boolean)
 const app = express(); app.disable('x-powered-by'); app.use(cors({
@@ -44,7 +69,6 @@ const storage = (dir: string, zipOnly: boolean) => multer({ limits: { fileSize: 
   storage: multer.diskStorage({ destination: path.join(uploadRoot, dir), filename: (req: any, f, cb) => cb(null, `${req.user.id}-${Date.now()}${path.extname(f.originalname)}`) }),
   fileFilter: (_r, f, cb) => cb(null, !zipOnly || f.originalname.toLowerCase().endsWith('.zip')) })
 
-app.use('/uploads/starters', express.static(path.join(uploadRoot, 'starters')))   // starter files are public; submissions are not
 app.get('/api/health', (_req, res) => res.json({ ok: true, database: mongoose.connection.readyState === 1 }))
 
 // ---------- Auth ----------
@@ -59,7 +83,18 @@ app.post('/api/auth/login', h(async (req: any, res: any) => {
   if (!u || !(await bcrypt.compare(req.body.password || '', u.password_hash))) return res.status(400).json({ error: 'Invalid email or password' }); res.json({ token: sign(u) }) }))
 app.get('/api/auth/me', auth(), (req: any, res) => res.json(req.user))
 app.get('/api/students', auth('admin'), h(async (_q: any, res: any) => res.json(await User.find({ role: 'student' }).sort('full_name'))))
-app.post('/api/upload/starter', auth('admin'), storage('starters', false).single('file'), (req: any, res) => res.json({ url: `/uploads/starters/${req.file.filename}` }))
+app.post('/api/upload/starter', auth('admin'), storage('starters', false).single('file'), h(async (req: any, res: any) => {
+  const tempPath = req.file.path
+  const publicId = `codegrade/starters/${req.user.id}-${Date.now()}`
+  try {
+    const url = await uploadToCloudinary(tempPath, 'codegrade/starters', publicId)
+    fs.unlinkSync(tempPath)
+    res.json({ url })
+  } catch (err) {
+    fs.unlinkSync(tempPath)
+    throw err
+  }
+}))
 
 // ---------- Assessments ----------
 app.get('/api/assessments', auth(), h(async (req: any, res: any) => {
@@ -75,10 +110,9 @@ app.get('/api/assessments/:id', auth('admin'), h(async (req: any, res: any) => r
 app.put('/api/assessments/:id', auth('admin'), h(async (req: any, res: any) => res.json(await Assessment.findByIdAndUpdate(req.params.id, req.body, { new: true }))))
 app.delete('/api/assessments/:id', auth('admin'), h(async (req: any, res: any) => {
   const subs = await Submission.find({ assessment: req.params.id })
-  const bucket = mongoose.connection.db && new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'submissions' })
   for (const s of subs) {
     if (s.zip_path && fs.existsSync(s.zip_path)) fs.unlinkSync(s.zip_path)
-    if (s.file_id && bucket) await bucket.delete(s.file_id).catch(() => undefined)
+    if ((s as any).cloudinary_url) await deleteFromCloudinary((s as any).cloudinary_url)
   }
   await Evaluation.deleteMany({ submission: { $in: subs.map(s => s.id) } }); await Submission.deleteMany({ assessment: req.params.id })
   await Assignment.deleteMany({ assessment: req.params.id }); await Assessment.findByIdAndDelete(req.params.id); res.json({ ok: true }) }))
@@ -231,19 +265,16 @@ app.post('/api/assessments/:id/submissions', auth('student'), storage('submissio
   const prev = await Submission.findOne({ assessment: A.id, student: req.user.id }).sort('-created_at')
   if (prev && !A.allow_resubmit) return fail(400, 'Resubmission is not allowed')
   if (!req.file && !req.body.github_url) return fail(400, 'Upload a ZIP file or add a GitHub link')
-  let file_id
+  let cloudinary_url: string | undefined
   if (req.file) {
-    const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'submissions' })
-    const upload = bucket.openUploadStream(req.file.filename, { contentType: req.file.mimetype })
-    await new Promise<void>((resolve, reject) => {
-      upload.once('finish', resolve)
-      upload.once('error', reject)
-      upload.end(fs.readFileSync(req.file.path))
-    })
-    file_id = upload.id
-    fs.unlinkSync(req.file.path)
+    const publicId = `codegrade/submissions/${req.user.id}-${Date.now()}`
+    try {
+      cloudinary_url = await uploadToCloudinary(req.file.path, 'codegrade/submissions', publicId)
+    } finally {
+      fs.unlinkSync(req.file.path)
+    }
   }
-  const submission = await Submission.create({ assessment: A.id, student: req.user.id, file_id, github_url: req.body.github_url || undefined, version: (prev?.version ?? 0) + 1 })
+  const submission = await Submission.create({ assessment: A.id, student: req.user.id, cloudinary_url, github_url: req.body.github_url || undefined, version: (prev?.version ?? 0) + 1 })
   if (A.theory_enabled) {
     submission.theory_questions = await generateTheoryQuestions(submission, A)
     submission.status = 'theory_pending'
@@ -266,7 +297,10 @@ app.get('/api/submissions/:id/download', auth('admin'), h(async (req: any, res: 
   const s = await Submission.findById(req.params.id)
   if (!s) return res.status(404).json({ error: 'Submission not found' })
   if (s.zip_path && fs.existsSync(s.zip_path)) return res.download(path.resolve(s.zip_path))
+  const cloudinaryUrl = (s as any).cloudinary_url
+  if (cloudinaryUrl) return res.redirect(cloudinaryUrl)
   if (!s.file_id) return res.status(404).json({ error: 'No file' })
+  // Legacy GridFS fallback
   const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'submissions' })
   res.setHeader('Content-Type', 'application/zip')
   res.setHeader('Content-Disposition', 'attachment; filename="submission.zip"')
@@ -276,6 +310,7 @@ app.delete('/api/submissions/:id', auth('admin'), h(async (req: any, res: any) =
   const submission = await Submission.findById(req.params.id)
   if (!submission) return res.status(404).json({ error: 'Submission not found' })
   if (submission.zip_path && fs.existsSync(submission.zip_path)) fs.unlinkSync(submission.zip_path)
+  if ((submission as any).cloudinary_url) await deleteFromCloudinary((submission as any).cloudinary_url)
   if (submission.file_id && mongoose.connection.db) {
     const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'submissions' })
     await bucket.delete(submission.file_id).catch(() => undefined)

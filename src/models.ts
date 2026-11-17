@@ -12,7 +12,7 @@ export const Assessment = model('Assessment', new Schema({
   starter_url: String, questions: { type: Array, default: [] }, rubric: { type: Array, default: [] }, created_by: ref('User'), created_at: { type: Date, default: Date.now } }))
 const asg = new Schema({ assessment: ref('Assessment'), student: ref('User') }); asg.index({ assessment: 1, student: 1 }, { unique: true }); asg.index({ student: 1, assessment: 1 })
 export const Assignment = model('Assignment', asg)
-const submissionSchema = new Schema({ assessment: ref('Assessment'), student: ref('User'), zip_path: String, file_id: Schema.Types.ObjectId, github_url: String, version: { type: Number, default: 1 },
+const submissionSchema = new Schema({ assessment: ref('Assessment'), student: ref('User'), zip_path: String, file_id: Schema.Types.ObjectId, cloudinary_url: String, github_url: String, version: { type: Number, default: 1 },
   code_files: { type: Array, default: [] }, theory_questions: { type: Array, default: [] }, theory_answers: { type: Array, default: [] }, theory_submitted: { type: Boolean, default: false },
   status: { type: String, enum: ['workspace', 'submitted', 'theory_pending', 'evaluating', 'review', 'published'], default: 'workspace' }, created_at: { type: Date, default: Date.now } })
 submissionSchema.index({ assessment: 1, student: 1, created_at: -1 })

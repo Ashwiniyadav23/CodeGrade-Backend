@@ -469,8 +469,10 @@ app.delete('/api/submissions/:id', auth('admin'), h(async (req: any, res: any) =
 }))
 app.post('/api/submissions/:id/evaluate', auth('admin'), h(async (req: any, res: any) => {
   const s = await Submission.findById(req.params.id)
-  const A = await Assessment.findById(s!.assessment)
-  if (!A!.rubric.length) return res.status(400).json({ error: 'Add rubric criteria to this assessment first' })
+  if (!s) return res.status(404).json({ error: 'Submission not found. Refresh the submissions list and open an existing submission.' })
+  const A = await Assessment.findById(s.assessment)
+  if (!A) return res.status(404).json({ error: 'The assessment for this submission no longer exists.' })
+  if (!A.rubric?.length) return res.status(400).json({ error: 'Add rubric criteria to this assessment first' })
   try { await evaluateAndStore(s, A); res.json({ ok: true }) } catch (e: any) { res.status(500).json({ error: e.message }) }
 }))
 app.put('/api/submissions/:id/evaluation', auth('admin'), h(async (req: any, res: any) => {

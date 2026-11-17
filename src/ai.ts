@@ -32,26 +32,53 @@ async function submissionCode(sub: any) {
     if (code) return code
   }
   if (sub.zip_path && fs.existsSync(sub.zip_path)) buf = fs.readFileSync(sub.zip_path)
-  else if (sub.cloudinary_url) {
-    // Download ZIP from Cloudinary
-    const r = await fetch(sub.cloudinary_url)
-    if (r.ok) buf = Buffer.from(await r.arrayBuffer())
+  // Try every available storage location. Older records can contain a stale
+  // Cloudinary URL alongside a still-valid GridFS file or GitHub link.
+  if (!buf && sub.cloudinary_url) {
+    try {
+      const r = await fetch(sub.cloudinary_url)
+      if (r.ok) buf = Buffer.from(await r.arrayBuffer())
+      else console.warn(`Submission ZIP download returned HTTP ${r.status} from Cloudinary.`)
+    } catch (error: any) {
+      console.warn('Submission ZIP download from Cloudinary failed:', error?.message || error)
+    }
   }
-  else if (sub.file_id && mongoose.connection.db) {
-    const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'submissions' })
-    buf = await new Promise<Buffer>((resolve, reject) => {
-      const chunks: Buffer[] = []
-      const stream = bucket.openDownloadStream(sub.file_id)
-      stream.on('data', chunk => chunks.push(Buffer.from(chunk)))
-      stream.once('error', reject)
-      stream.once('end', () => resolve(Buffer.concat(chunks)))
+  if (!buf && sub.file_id && mongoose.connection.db) {
+    try {
+      const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'submissions' })
+      buf = await new Promise<Buffer>((resolve, reject) => {
+        const chunks: Buffer[] = []
+        const stream = bucket.openDownloadStream(sub.file_id)
+        stream.on('data', chunk => chunks.push(Buffer.from(chunk)))
+        stream.once('error', reject)
+        stream.once('end', () => resolve(Buffer.concat(chunks)))
+      })
+    } catch (error: any) {
+      console.warn('Submission ZIP download from GridFS failed:', error?.message || error)
+    }
+  }
+  if (!buf && sub.github_url) {
+    try {
+      const m = sub.github_url.match(/github\.com\/([^/]+)\/([^/#?]+)/i)
+      if (m) {
+        const r = await fetch(`https://codeload.github.com/${m[1]}/${m[2].replace(/\.git$/, '')}/zip/HEAD`)
+        if (r.ok) buf = Buffer.from(await r.arrayBuffer())
+        else console.warn(`GitHub archive download returned HTTP ${r.status}.`)
+      }
+    } catch (error: any) {
+      console.warn('Submission ZIP download from GitHub failed:', error?.message || error)
+    }
+  }
+  if (!buf) {
+    console.error('submissionCode: could not read submission. sub fields →', {
+      has_code_files: Array.isArray(sub.code_files) && sub.code_files.length > 0,
+      zip_path: sub.zip_path || null,
+      cloudinary_url: sub.cloudinary_url || null,
+      file_id: sub.file_id || null,
+      github_url: sub.github_url || null,
     })
+    throw new Error('No readable submission (upload a ZIP or a public GitHub repo).')
   }
-  else if (sub.github_url) {
-    const m = sub.github_url.match(/github\.com\/([^/]+)\/([^/#?]+)/)
-    if (m) { const r = await fetch(`https://codeload.github.com/${m[1]}/${m[2].replace(/\.git$/, '')}/zip/HEAD`); if (r.ok) buf = Buffer.from(await r.arrayBuffer()) }
-  }
-  if (!buf) throw new Error('No readable submission (upload a ZIP or a public GitHub repo).')
   let code = ''
   const images: string[] = []
   for (const e of new AdmZip(buf).getEntries()) {

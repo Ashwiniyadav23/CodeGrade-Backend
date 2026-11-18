@@ -123,15 +123,19 @@ export const providerResponse = async (prompt: string) => {
   if (provider === 'gemini' && !process.env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is not configured for AI evaluation.')
   if (provider === 'anthropic' && !process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not configured for AI evaluation.')
   const maxAttempts = Math.min(5, Math.max(1, Number(process.env.AI_RETRY_ATTEMPTS || 4)))
-  let geminiModel = process.env.GEMINI_MODEL || 'gemini-3.8-flash'
-  const geminiFallbackModel = process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.6-flash'
+  const geminiModels = [...new Set([
+    process.env.GEMINI_MODEL || 'gemini-3.8-flash',
+    ...(process.env.GEMINI_FALLBACK_MODELS || process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.7-flash,gemini-3.6-flash')
+      .split(',').map(model => model.trim()).filter(Boolean),
+  ])]
+  let geminiModelIndex = 0
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), Number(process.env.AI_TIMEOUT_MS || 180000))
     let r: Response
     try {
       r = provider === 'gemini'
-        ? await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY!)}`, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ contents:[{parts:[{text:prompt}]}], generationConfig:{responseMimeType:'application/json'} }), signal:controller.signal })
+        ? await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${geminiModels[geminiModelIndex]}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY!)}`, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ contents:[{parts:[{text:prompt}]}], generationConfig:{responseMimeType:'application/json'} }), signal:controller.signal })
         : provider === 'anthropic'
         ? await fetch('https://api.anthropic.com/v1/messages', { method:'POST', headers:{'x-api-key':process.env.ANTHROPIC_API_KEY!, 'anthropic-version':'2023-06-01','content-type':'application/json'}, body:JSON.stringify({ model:process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5-20250929', max_tokens:4000, messages:[{role:'user',content:prompt}]}), signal:controller.signal })
         : await fetch(`${process.env.OLLAMA_URL || 'http://127.0.0.1:11434'}/api/generate`, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({model:process.env.OLLAMA_MODEL || 'llama3.2', prompt, stream:false, format:'json'}), signal:controller.signal })
@@ -152,9 +156,10 @@ export const providerResponse = async (prompt: string) => {
       const modelUnavailable = provider === 'gemini' && [404, 410].includes(r.status)
       const temporaryFailure = [408, 425, 429, 500, 502, 503, 504, 529].includes(r.status)
         || lowerMsg.includes('high demand') || lowerMsg.includes('overloaded') || lowerMsg.includes('temporarily unavailable')
-      if (!quotaFailure && (temporaryFailure || modelUnavailable) && provider === 'gemini' && geminiModel !== geminiFallbackModel) {
-        console.warn(`Gemini model ${geminiModel} is unavailable (${r.status}); retrying with ${geminiFallbackModel}.`)
-        geminiModel = geminiFallbackModel
+      if (!quotaFailure && (temporaryFailure || modelUnavailable) && provider === 'gemini' && geminiModelIndex < geminiModels.length - 1) {
+        const previousModel = geminiModels[geminiModelIndex]
+        geminiModelIndex++
+        console.warn(`Gemini model ${previousModel} is unavailable (${r.status}); retrying with ${geminiModels[geminiModelIndex]}.`)
         continue
       }
       if (temporaryFailure && !quotaFailure && attempt < maxAttempts) {
@@ -219,62 +224,7 @@ The final maximum is the sum of the rubric criteria maximum_marks, not a separat
 ASSESSMENT REQUIREMENTS:
 ASSESSMENT: ${A.title} (${A.language}, ${A.difficulty})\nQUESTIONS:\n${questions}\nRUBRIC:\n${rubric}\n\nSTUDENT CODE:${code}
 The rubric criteria in the output must be exactly the same count and order as the rubric input. Scores must be numbers from 0 through that criterion's maximum, and their sum must equal the total. Respond with ONLY valid JSON matching this shape: {"criteria":[{"criterion_id":"<exact rubric criterion_id>","level":"excellent|good|average|needs_improvement","score":<number 0..max>,"feedback":"<requirement, files inspected, evidence, score justification, and—if deducted—the exact shortfall, reason, and marks deducted>","evidence":"<file path(s) + relevant implementation, or explicit verification limitation>"}],"strengths":["<genuine demonstrated strength with evidence>"],"weaknesses":["<actual weakness or deduction: requirement; inspected evidence; why it falls short; marks deducted>"],"suggestions":["<specific improvement required to reach full marks>"],"mentor_recommendations":"<clear next learning step and mentor focus>","summary":"<2-3 evidence-based sentences>","performance_level":"Basic|Average|Good|Excellent"}`
-  const provider = (process.env.AI_PROVIDER || (process.env.GEMINI_API_KEY ? 'gemini' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : 'ollama')).toLowerCase()
-  if (provider !== 'ollama' && provider !== 'anthropic' && provider !== 'gemini') {
-    throw new Error(`Unsupported AI_PROVIDER "${provider}". Use "gemini", "anthropic", or "ollama".`)
-  }
-  if (provider === 'anthropic' && !process.env.ANTHROPIC_API_KEY) {
-    throw new Error('ANTHROPIC_API_KEY is not configured for AI evaluation.')
-  }
-  if (provider === 'gemini' && !process.env.GEMINI_API_KEY) {
-    throw new Error('GEMINI_API_KEY is not configured for AI evaluation.')
-  }
-  if (provider === 'ollama' && process.env.RENDER && /127\.0\.0\.1|localhost/.test(process.env.OLLAMA_URL || '')) {
-    throw new Error('OLLAMA_URL points to localhost in the deployed backend. Configure a publicly reachable Ollama URL or set AI_PROVIDER=gemini.')
-  }
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), Number(process.env.AI_TIMEOUT_MS || 180000))
-  let r: Response
-  try {
-    r = provider === 'ollama'
-      ? await fetch(`${process.env.OLLAMA_URL || 'http://127.0.0.1:11434'}/api/generate`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ model: process.env.OLLAMA_MODEL || 'llama3.2', prompt, stream: false, format: 'json' }),
-          signal: controller.signal,
-        })
-      : provider === 'anthropic'
-      ? await fetch('https://api.anthropic.com/v1/messages', { method: 'POST',
-          headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY!, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-          body: JSON.stringify({ model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5-20250929', max_tokens: 4000, messages: [{ role: 'user', content: prompt }] }),
-          signal: controller.signal,
-        })
-      : await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_MODEL || 'gemini-2.0-flash'}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY!)}`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: 'application/json' } }),
-          signal: controller.signal,
-        })
-  } catch (error: any) {
-    if (error?.name === 'AbortError') throw new Error('AI evaluation timed out. Increase AI_TIMEOUT_MS or use a faster model.')
-    throw new Error(`Could not connect to the ${provider} AI provider: ${error?.message || 'network request failed'}`)
-  } finally {
-    clearTimeout(timeout)
-  }
-  const out: any = await r.json()
-  if (!r.ok) {
-    const msg: string = out.error?.message ?? out.message ?? 'AI request failed'
-    if (r.status === 429 || msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('rate')) {
-      throw new Error('AI quota exceeded. The free-tier daily limit has been reached. Please try again later or ask your admin to upgrade the AI plan.')
-    }
-    throw new Error(msg)
-  }
-  const text = provider === 'ollama'
-    ? out.response ?? ''
-    : provider === 'anthropic'
-    ? out.content.map((c: any) => c.text ?? '').join('')
-    : out.candidates?.[0]?.content?.parts?.map((p: any) => p.text ?? '').join('') ?? ''
-  const ai = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1))
+  const ai = await providerResponse(prompt)
   const criteria = A.rubric.map((c: any) => { const x = ai.criteria.find((y: any) => y.criterion_id === c.id) ?? {}
     return { criterion_id: c.id, name: c.name, max: c.marks, score: Math.min(Math.max(Number(x.score) || 0, 0), c.marks), level: x.level ?? 'average', feedback: x.feedback ?? '', evidence: x.evidence ?? '' } })
   const total = criteria.reduce((t: number, c: any) => t + c.score, 0)

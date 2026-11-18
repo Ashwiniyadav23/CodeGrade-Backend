@@ -39,6 +39,17 @@ const uploadToCloudinary = (filePath: string, folder: string, publicId: string):
     )
   })
 
+const cloudinaryMaxUploadBytes = 10 * 1024 * 1024
+const uploadToGridFS = (filePath: string, bucketName: string, filename: string): Promise<mongoose.Types.ObjectId> =>
+  new Promise((resolve, reject) => {
+    if (!mongoose.connection.db) return reject(new Error('Database is not connected.'))
+    const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName })
+    const upload = bucket.openUploadStream(filename)
+    upload.once('error', reject)
+    upload.once('finish', () => resolve(upload.id as mongoose.Types.ObjectId))
+    fs.createReadStream(filePath).once('error', reject).pipe(upload)
+  })
+
 const deleteFromCloudinary = async (cloudinaryUrl: string) => {
   try {
     const match = cloudinaryUrl.match(/\/upload\/(?:v\d+\/)?(.+)$/)
@@ -162,13 +173,24 @@ app.post('/api/upload/starter', auth('admin'), storage('starters', false).single
   const tempPath = req.file.path
   const publicId = `codegrade/starters/${req.user.id}-${Date.now()}`
   try {
-    const url = await uploadToCloudinary(tempPath, 'codegrade/starters', publicId)
+    const url = req.file.size > cloudinaryMaxUploadBytes
+      ? `gridfs:${await uploadToGridFS(tempPath, 'starters', path.basename(req.file.originalname))}`
+      : await uploadToCloudinary(tempPath, 'codegrade/starters', publicId)
     fs.unlinkSync(tempPath)
     res.json({ url })
   } catch (err) {
     fs.unlinkSync(tempPath)
     throw err
   }
+}))
+app.get('/api/starters/:id/download', auth(), h(async (req: any, res: any) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id) || !mongoose.connection.db) return res.status(404).json({ error: 'Starter file not found' })
+  const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'starters' })
+  res.setHeader('Content-Type', 'application/zip')
+  res.setHeader('Content-Disposition', 'attachment; filename="starter-files.zip"')
+  bucket.openDownloadStream(new mongoose.Types.ObjectId(req.params.id))
+    .on('error', () => { if (!res.headersSent) res.status(404).json({ error: 'Starter file not found' }) })
+    .pipe(res)
 }))
 
 // ---------- Assessments ----------
@@ -391,6 +413,7 @@ app.post('/api/assessments/:id/submissions', auth('student'), storage('submissio
 
   // ---- Upload to Cloudinary if we have a file (multipart or decoded) ----
   let cloudinary_url: string | undefined
+  let file_id: mongoose.Types.ObjectId | undefined
   let code_files: Array<{ path: string; content: string }> = []
   if (hasFile || tempPath) {
     const filePath = hasFile ? req.file.path : tempPath!
@@ -402,7 +425,11 @@ app.post('/api/assessments/:id/submissions', auth('student'), storage('submissio
         return fail(400, 'The uploaded file is not a valid ZIP archive.')
       }
       if (!code_files.length) return fail(400, 'The ZIP contains no supported source files to evaluate.')
-      cloudinary_url = await uploadToCloudinary(filePath, 'codegrade/submissions', publicId)
+      if (fs.statSync(filePath).size > cloudinaryMaxUploadBytes) {
+        file_id = await uploadToGridFS(filePath, 'submissions', path.basename(filePath))
+      } else {
+        cloudinary_url = await uploadToCloudinary(filePath, 'codegrade/submissions', publicId)
+      }
     } finally {
       // Clean up the temporary file in both cases
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
@@ -413,6 +440,7 @@ app.post('/api/assessments/:id/submissions', auth('student'), storage('submissio
     assessment: A.id,
     student: req.user.id,
     cloudinary_url,
+    file_id,
     code_files,
     github_url: hasGitUrl ? req.body.github_url : undefined,
     version: (prev?.version ?? 0) + 1,

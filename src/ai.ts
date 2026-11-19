@@ -118,10 +118,11 @@ async function evaluateSubmissionNow(sub: any, A: any) {
 }
 
 export const providerResponse = async (prompt: string) => {
-  const provider = (process.env.AI_PROVIDER || (process.env.GEMINI_API_KEY ? 'gemini' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : 'ollama')).toLowerCase()
-  if (!['gemini', 'anthropic', 'ollama'].includes(provider)) throw new Error(`Unsupported AI_PROVIDER "${provider}".`)
+  const provider = (process.env.AI_PROVIDER || (process.env.GROQ_API_KEY ? 'groq' : process.env.GEMINI_API_KEY ? 'gemini' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : 'ollama')).toLowerCase()
+  if (!['gemini', 'anthropic', 'groq', 'ollama'].includes(provider)) throw new Error(`Unsupported AI_PROVIDER "${provider}".`)
   if (provider === 'gemini' && !process.env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is not configured for AI evaluation.')
   if (provider === 'anthropic' && !process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not configured for AI evaluation.')
+  if (provider === 'groq' && !process.env.GROQ_API_KEY) throw new Error('GROQ_API_KEY is not configured for AI evaluation.')
   const maxAttempts = Math.min(5, Math.max(1, Number(process.env.AI_RETRY_ATTEMPTS || 4)))
   const geminiModels = [...new Set([
     process.env.GEMINI_MODEL || 'gemini-3.8-flash',
@@ -138,6 +139,8 @@ export const providerResponse = async (prompt: string) => {
         ? await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${geminiModels[geminiModelIndex]}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY!)}`, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ contents:[{parts:[{text:prompt}]}], generationConfig:{responseMimeType:'application/json'} }), signal:controller.signal })
         : provider === 'anthropic'
         ? await fetch('https://api.anthropic.com/v1/messages', { method:'POST', headers:{'x-api-key':process.env.ANTHROPIC_API_KEY!, 'anthropic-version':'2023-06-01','content-type':'application/json'}, body:JSON.stringify({ model:process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5-20250929', max_tokens:4000, messages:[{role:'user',content:prompt}]}), signal:controller.signal })
+        : provider === 'groq'
+        ? await fetch('https://api.groq.com/openai/v1/chat/completions', { method:'POST', headers:{'Authorization':`Bearer ${process.env.GROQ_API_KEY!}`, 'content-type':'application/json'}, body:JSON.stringify({ model:process.env.GROQ_MODEL || 'openai/gpt-oss-20b', messages:[{role:'user',content:prompt}], response_format:{type:'json_object'} }), signal:controller.signal })
         : await fetch(`${process.env.OLLAMA_URL || 'http://127.0.0.1:11434'}/api/generate`, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({model:process.env.OLLAMA_MODEL || 'llama3.2', prompt, stream:false, format:'json'}), signal:controller.signal })
     } catch (error: any) {
       if (error?.name === 'AbortError') throw new Error('AI evaluation timed out.')
@@ -169,7 +172,7 @@ export const providerResponse = async (prompt: string) => {
       if (quotaFailure) throw new Error('AI quota exceeded. Please try again later or ask your admin to configure another AI provider.')
       throw new Error(temporaryFailure ? `AI provider is still overloaded after ${attempt} attempts. Please retry shortly.` : msg)
     }
-    const text = provider === 'ollama' ? out.response ?? '' : provider === 'anthropic' ? out.content?.map((c:any)=>c.text ?? '').join('') ?? '' : out.candidates?.[0]?.content?.parts?.map((p:any)=>p.text ?? '').join('') ?? ''
+    const text = provider === 'ollama' ? out.response ?? '' : provider === 'anthropic' ? out.content?.map((c:any)=>c.text ?? '').join('') ?? '' : provider === 'groq' ? out.choices?.[0]?.message?.content ?? '' : out.candidates?.[0]?.content?.parts?.map((p:any)=>p.text ?? '').join('') ?? ''
     const start = text.indexOf('{'); const end = text.lastIndexOf('}')
     if (start < 0 || end < start) throw new Error('AI returned invalid JSON.')
     return JSON.parse(text.slice(start, end + 1))

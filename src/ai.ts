@@ -130,6 +130,7 @@ export const providerResponse = async (prompt: string) => {
       .split(',').map(model => model.trim()).filter(Boolean),
   ])]
   let geminiModelIndex = 0
+  let groqJsonMode = true
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), Number(process.env.AI_TIMEOUT_MS || 180000))
@@ -140,7 +141,7 @@ export const providerResponse = async (prompt: string) => {
         : provider === 'anthropic'
         ? await fetch('https://api.anthropic.com/v1/messages', { method:'POST', headers:{'x-api-key':process.env.ANTHROPIC_API_KEY!, 'anthropic-version':'2023-06-01','content-type':'application/json'}, body:JSON.stringify({ model:process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5-20250929', max_tokens:4000, messages:[{role:'user',content:prompt}]}), signal:controller.signal })
         : provider === 'groq'
-        ? await fetch('https://api.groq.com/openai/v1/chat/completions', { method:'POST', headers:{'Authorization':`Bearer ${process.env.GROQ_API_KEY!}`, 'content-type':'application/json'}, body:JSON.stringify({ model:process.env.GROQ_MODEL || 'openai/gpt-oss-20b', messages:[{role:'user',content:prompt}], response_format:{type:'json_object'} }), signal:controller.signal })
+        ? await fetch('https://api.groq.com/openai/v1/chat/completions', { method:'POST', headers:{'Authorization':`Bearer ${process.env.GROQ_API_KEY!}`, 'content-type':'application/json'}, body:JSON.stringify({ model:process.env.GROQ_MODEL || 'openai/gpt-oss-20b', messages:[{role:'user',content:prompt}], max_completion_tokens:Number(process.env.GROQ_MAX_COMPLETION_TOKENS || 8192), ...(groqJsonMode ? {response_format:{type:'json_object'}} : {}) }), signal:controller.signal })
         : await fetch(`${process.env.OLLAMA_URL || 'http://127.0.0.1:11434'}/api/generate`, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({model:process.env.OLLAMA_MODEL || 'llama3.2', prompt, stream:false, format:'json'}), signal:controller.signal })
     } catch (error: any) {
       if (error?.name === 'AbortError') throw new Error('AI evaluation timed out.')
@@ -155,6 +156,11 @@ export const providerResponse = async (prompt: string) => {
     if (!r.ok) {
       const msg: string = out.error?.message ?? out.message ?? 'AI request failed'
       const lowerMsg = msg.toLowerCase()
+      if (provider === 'groq' && groqJsonMode && attempt < maxAttempts && (out.error?.failed_generation || lowerMsg.includes('failed to generate json'))) {
+        groqJsonMode = false
+        console.warn('Groq JSON mode could not generate a response; retrying in plain completion mode.')
+        continue
+      }
       const quotaFailure = lowerMsg.includes('quota') || lowerMsg.includes('daily limit') || lowerMsg.includes('billing')
       const modelUnavailable = provider === 'gemini' && [404, 410].includes(r.status)
       const temporaryFailure = [408, 425, 429, 500, 502, 503, 504, 529].includes(r.status)

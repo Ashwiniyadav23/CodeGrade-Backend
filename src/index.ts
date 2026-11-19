@@ -155,11 +155,14 @@ const storage = (dir: string, zipOnly: boolean) =>
 
 // Routes (unchanged from original)
 app.post('/api/auth/register', h(async (req: any, res: any) => {
-  const { email, password, full_name, batch } = req.body
+  const { email, password, full_name, batch, request_admin_access } = req.body
   if (!email || !password || password.length < 6) return res.status(400).json({ error: 'Email and a 6+ character password are required' })
-  if (await User.findOne({ email: email.toLowerCase() })) return res.status(400).json({ error: 'Email already registered' })
-  const role = process.env.ADMIN_EMAIL && email.toLowerCase() === process.env.ADMIN_EMAIL.toLowerCase() ? 'admin' : 'student'
-  const u = await User.create({ email, full_name, batch, role, password_hash: await bcrypt.hash(password, 10) })
+  const normalizedEmail = email.toLowerCase().trim()
+  if (await User.findOne({ email: normalizedEmail })) return res.status(400).json({ error: 'Email already registered' })
+  const isConfiguredAdmin = !!process.env.ADMIN_EMAIL && normalizedEmail === process.env.ADMIN_EMAIL.toLowerCase().trim()
+  const role = isConfiguredAdmin ? 'admin' : 'student'
+  const admin_access_status = isConfiguredAdmin ? 'approved' : request_admin_access ? 'pending' : 'none'
+  const u = await User.create({ email: normalizedEmail, full_name, batch, role, admin_access_status, password_hash: await bcrypt.hash(password, 10) })
   res.json({ token: sign(u) })
 }))
 app.post('/api/auth/login', h(async (req: any, res: any) => {
@@ -168,6 +171,26 @@ app.post('/api/auth/login', h(async (req: any, res: any) => {
   res.json({ token: sign(u) })
 }))
 app.get('/api/auth/me', auth(), (req: any, res: any) => res.json(req.user))
+app.post('/api/admin-access/request', auth('student'), h(async (req: any, res: any) => {
+  if (req.user.admin_access_status === 'pending') return res.status(400).json({ error: 'Your admin access request is already pending.' })
+  if (req.user.admin_access_status === 'declined') return res.status(403).json({ error: 'Your admin access request was declined.' })
+  req.user.admin_access_status = 'pending'
+  await req.user.save()
+  res.json({ ok: true, admin_access_status: req.user.admin_access_status })
+}))
+app.get('/api/admin-access/requests', auth('admin'), h(async (_req: any, res: any) => {
+  res.json(await User.find({ admin_access_status: 'pending' }).select('full_name email batch admin_access_status').sort('full_name'))
+}))
+app.put('/api/admin-access/requests/:id', auth('admin'), h(async (req: any, res: any) => {
+  const decision = req.body.decision
+  if (!['approve', 'decline'].includes(decision)) return res.status(400).json({ error: 'Decision must be approve or decline.' })
+  const user = await User.findOne({ _id: req.params.id, admin_access_status: 'pending' })
+  if (!user) return res.status(404).json({ error: 'Pending admin access request not found.' })
+  user.admin_access_status = decision === 'approve' ? 'approved' : 'declined'
+  if (decision === 'approve') user.role = 'admin'
+  await user.save()
+  res.json({ ok: true, decision })
+}))
 app.get('/api/students', auth('admin'), h(async (_q: any, res: any) => res.json(await User.find({ role: 'student' }).sort('full_name'))))
 app.post('/api/upload/starter', auth('admin'), storage('starters', false).single('file'), h(async (req: any, res: any) => {
   const tempPath = req.file.path

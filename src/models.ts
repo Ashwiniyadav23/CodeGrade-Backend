@@ -2,7 +2,7 @@ import mongoose, { Schema, model } from 'mongoose'
 // Expose `id` instead of `_id`, and never leak password hashes.
 mongoose.set('toJSON', { virtuals: false, transform: (_d: any, r: any) => { r.id = String(r._id); delete r._id; delete r.__v; delete r.password_hash; return r } })
 const ref = (m: string) => ({ type: Schema.Types.ObjectId, ref: m })
-const userSchema = new Schema({ full_name: String, email: { type: String, unique: true, lowercase: true }, password_hash: String, role: { type: String, enum: ['admin', 'student'], default: 'student' }, batch: String })
+const userSchema = new Schema({ full_name: String, email: { type: String, unique: true, lowercase: true }, password_hash: String, role: { type: String, enum: ['admin', 'student'], default: 'student' }, admin_access_status: { type: String, enum: ['none', 'pending', 'approved', 'declined'], default: 'none' }, batch: String })
 userSchema.index({ role: 1, full_name: 1 })
 export const User = model('User', userSchema)
 export const Assessment = model('Assessment', new Schema({

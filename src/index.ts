@@ -243,7 +243,9 @@ app.get('/api/assessments/:id/my', auth('student'), h(async (req: any, res: any)
   const assignment = await Assignment.findOne({ assessment: req.params.id, student: req.user.id })
   if (!assignment) return res.status(403).json({ error: 'Not assigned to you. Ask an admin to assign this assessment to your student account.' })
   const assessment = await Assessment.findById(req.params.id)
-  const submission = await Submission.findOne({ assessment: req.params.id, student: req.user.id }).sort('-created_at')
+  const submission = await Submission.findOne({ assessment: req.params.id, student: req.user.id })
+    .select('assessment student version theory_questions theory_answers theory_submitted status created_at')
+    .sort('-created_at')
   const evaluation = submission && (await Evaluation.findOne({ submission: submission.id }))
   res.json({ assessment, submission, evaluation: evaluation ?? null })
 }))
@@ -479,12 +481,19 @@ app.post('/api/assessments/:id/submissions', auth('student'), storage('submissio
 
 // Admin submissions, evaluations
 app.get('/api/submissions', auth('admin'), h(async (_q: any, res: any) => {
-  const subs = await Submission.find().sort('-created_at').populate('assessment', 'title max_marks').populate('student', 'full_name batch')
-  const evs = await Evaluation.find({ submission: { $in: subs.map(s => s.id) } })
-  res.json(subs.map(s => ({ ...s.toJSON(), total: evs.find(e => String(e.submission) === s.id)?.total })))
+  // Keep this table response small. Legacy submissions can contain large
+  // embedded source archives, but the list only needs these summary fields.
+  const subs = await Submission.find().select('assessment student status created_at version')
+    .sort('-created_at').populate('assessment', 'title max_marks').populate('student', 'full_name email batch').lean()
+  const submissionIds = subs.map((s: any) => s._id)
+  const evs = await Evaluation.find({ submission: { $in: submissionIds } }).select('submission total').lean()
+  const totals = new Map(evs.map((ev: any) => [String(ev.submission), ev.total]))
+  res.json(subs.map((s: any) => ({ ...s, id: String(s._id), total: totals.get(String(s._id)) ?? null })))
 }))
 app.get('/api/submissions/:id', auth('admin'), h(async (req: any, res: any) => {
-  const submission = await Submission.findById(req.params.id).populate('assessment', 'title max_marks').populate('student', 'full_name email')
+  const submission = await Submission.findById(req.params.id)
+    .select('assessment student status created_at version zip_path file_id cloudinary_url github_url')
+    .populate('assessment', 'title max_marks').populate('student', 'full_name email')
   res.json({ submission, evaluation: await Evaluation.findOne({ submission: req.params.id }) })
 }))
 app.get('/api/submissions/:id/download', auth('admin'), h(async (req: any, res: any) => {

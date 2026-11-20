@@ -7,57 +7,17 @@ import jwt from 'jsonwebtoken'
 import multer from 'multer'
 import path from 'path'
 import fs from 'fs'
-import { v2 as cloudinary } from 'cloudinary'
 import { User, Assessment, Assignment, Submission, Evaluation } from './models.js'
 import { evaluateSubmission, evaluateTheory, extractSubmissionFiles, generateTheoryQuestions } from './ai.js'
+import { deleteCloudinaryAsset, downloadCloudinaryAsset, isChunkedCloudinaryAsset, uploadCloudinaryAsset, uploadCloudinaryBuffer } from './cloudinaryStorage.js'
 
 const SECRET = process.env.JWT_SECRET || 'dev-secret'
 const uploadRoot = '/tmp/codegrade/uploads'
 fs.mkdirSync(path.join(uploadRoot, 'starters'), { recursive: true })
 fs.mkdirSync(path.join(uploadRoot, 'submissions'), { recursive: true })
 
-// Configure Cloudinary
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-})
-
-// Log config (mask secret)
-console.log('🔧 Cloudinary config →', {
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME ?? null,
-  api_key: process.env.CLOUDINARY_API_KEY ?? null,
-  api_secret: process.env.CLOUDINARY_API_SECRET ? '***' : null,
-})
-
-const uploadToCloudinary = (filePath: string, folder: string, publicId: string): Promise<string> =>
-  new Promise((resolve, reject) => {
-    if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
-      return reject(new Error('Cloudinary is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET before accepting uploads.'))
-    }
-    const extension = path.extname(filePath) || '.bin'
-    const filename = `${path.basename(publicId, path.extname(publicId))}${extension}`
-    cloudinary.uploader.upload(
-      filePath,
-      { resource_type: 'raw', folder, public_id: filename, overwrite: true },
-      (err, result) => (err ? reject(err) : resolve(result!.secure_url))
-    )
-  })
-
-const uploadBufferToCloudinary = (buffer: Buffer, folder: string, filename: string): Promise<string> =>
-  new Promise((resolve, reject) => {
-    if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
-      return reject(new Error('Cloudinary is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET before accepting uploads.'))
-    }
-    const upload = cloudinary.uploader.upload_stream(
-      { resource_type: 'raw', folder, public_id: filename, overwrite: true },
-      (err, result) => (err ? reject(err) : resolve(result!.secure_url))
-    )
-    upload.end(buffer)
-  })
-
 const uploadWorkspaceFiles = (files: Array<{path:string; content:string}>, userId: string, assessmentId: string, submissionVersion?: number) =>
-  uploadBufferToCloudinary(
+  uploadCloudinaryBuffer(
     Buffer.from(JSON.stringify(files)),
     submissionVersion === undefined ? 'codegrade/workspaces' : 'codegrade/workspace-submissions',
     `${userId}-${assessmentId}${submissionVersion === undefined ? '' : `-v${submissionVersion}`}.json`
@@ -72,15 +32,7 @@ const readCloudinaryWorkspaceFiles = async (url?: string) => {
   return files
 }
 
-const deleteFromCloudinary = async (cloudinaryUrl: string) => {
-  try {
-    const match = cloudinaryUrl.match(/\/upload\/(?:v\d+\/)?(.+)$/)
-    if (match) {
-      const publicId = match[1]
-      await cloudinary.uploader.destroy(publicId, { resource_type: 'raw' })
-    }
-  } catch (_) {}
-}
+const deleteFromCloudinary = deleteCloudinaryAsset
 
 const frontendOrigins = (process.env.FRONTEND_ORIGIN || 'http://localhost:5173,http://localhost:5174,http://localhost:5175')
   .split(',')
@@ -220,13 +172,21 @@ app.post('/api/upload/starter', auth('admin'), storage('starters', false).single
   const tempPath = req.file.path
   const publicId = `${req.user.id}-${Date.now()}`
   try {
-    const url = await uploadToCloudinary(tempPath, 'codegrade/starters', publicId)
+    const url = await uploadCloudinaryAsset(tempPath, 'codegrade/starters', publicId)
     fs.unlinkSync(tempPath)
     res.json({ url })
   } catch (err) {
     fs.unlinkSync(tempPath)
     throw err
   }
+}))
+app.get('/api/starters/cloudinary/download', auth(), h(async (req: any, res: any) => {
+  const assetUrl = typeof req.query.url === 'string' ? req.query.url : ''
+  if (!isChunkedCloudinaryAsset(assetUrl)) return res.status(400).json({ error: 'Invalid starter file reference.' })
+  const buffer = await downloadCloudinaryAsset(assetUrl)
+  res.setHeader('Content-Type', 'application/zip')
+  res.setHeader('Content-Disposition', 'attachment; filename="starter-files.zip"')
+  res.send(buffer)
 }))
 app.get('/api/starters/:id/download', auth(), h(async (req: any, res: any) => {
   if (!mongoose.Types.ObjectId.isValid(req.params.id) || !mongoose.connection.db) return res.status(404).json({ error: 'Starter file not found' })
@@ -475,7 +435,7 @@ app.post('/api/assessments/:id/submissions', auth('student'), storage('submissio
         return fail(400, 'The uploaded file is not a valid ZIP archive.')
       }
       if (!sourceFiles.length) return fail(400, 'The ZIP contains no supported source files to evaluate.')
-      cloudinary_url = await uploadToCloudinary(filePath, 'codegrade/submissions', publicId)
+      cloudinary_url = await uploadCloudinaryAsset(filePath, 'codegrade/submissions', publicId)
     } finally {
       // Clean up the temporary file in both cases
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
@@ -532,7 +492,13 @@ app.get('/api/submissions/:id/download', auth('admin'), h(async (req: any, res: 
   if (!s) return res.status(404).json({ error: 'Submission not found' })
   if (s.zip_path && fs.existsSync(s.zip_path)) return res.download(path.resolve(s.zip_path))
   const cloudinaryUrl = (s as any).cloudinary_url
-  if (cloudinaryUrl) return res.redirect(cloudinaryUrl)
+  if (cloudinaryUrl) {
+    if (!isChunkedCloudinaryAsset(cloudinaryUrl)) return res.redirect(cloudinaryUrl)
+    const buffer = await downloadCloudinaryAsset(cloudinaryUrl)
+    res.setHeader('Content-Type', 'application/zip')
+    res.setHeader('Content-Disposition', 'attachment; filename="submission.zip"')
+    return res.send(buffer)
+  }
   if (!s.file_id) return res.status(404).json({ error: 'No file' })
   const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'submissions' })
   res.setHeader('Content-Type', 'application/zip')

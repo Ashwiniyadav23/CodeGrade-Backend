@@ -1,6 +1,7 @@
 import AdmZip from 'adm-zip'
 import fs from 'fs'
 import mongoose from 'mongoose'
+import { downloadCloudinaryAsset } from './cloudinaryStorage.js'
 const EXT = /\.(py|js|jsx|ts|tsx|java|c|cpp|h|hpp|cs|go|rs|php|rb|html|css|sql|json|md|txt|yml|yaml)$/i
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i
 const SKIP = /(node_modules|\.git\/|dist\/|build\/|package-lock|\.min\.|venv\/|__pycache__)/
@@ -66,9 +67,7 @@ async function submissionCode(sub: any) {
   // Cloudinary URL alongside a still-valid GridFS file or GitHub link.
   if (!buf && sub.cloudinary_url) {
     try {
-      const r = await fetch(sub.cloudinary_url)
-      if (r.ok) buf = Buffer.from(await r.arrayBuffer())
-      else console.warn(`Submission ZIP download returned HTTP ${r.status} from Cloudinary.`)
+      buf = await downloadCloudinaryAsset(sub.cloudinary_url)
     } catch (error: any) {
       console.warn('Submission ZIP download from Cloudinary failed:', error?.message || error)
     }

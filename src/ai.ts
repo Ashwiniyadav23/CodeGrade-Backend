@@ -21,9 +21,8 @@ export async function evaluateSubmission(sub: any, A: any) {
   return withAiLimit(() => evaluateSubmissionNow(sub, A))
 }
 
-// Persist the source files extracted from uploaded ZIPs with the submission.
-// Evaluation then uses MongoDB data directly instead of depending on a later
-// Cloudinary download from a short-lived server process.
+// Extract source files only to validate the archive; new uploaded source stays
+// in Cloudinary so submissions do not expand Atlas storage.
 export function extractSubmissionFiles(buffer: Buffer) {
   const files: Array<{ path: string; content: string }> = []
   let total = 0
@@ -39,6 +38,21 @@ export function extractSubmissionFiles(buffer: Buffer) {
 
 async function submissionCode(sub: any) {
   let buf: Buffer | null = null
+  if (sub.code_files_url) {
+    try {
+      const r = await fetch(sub.code_files_url)
+      if (r.ok) {
+        const files = await r.json()
+        if (Array.isArray(files)) {
+          const code = files.filter((file: any) => typeof file?.path === 'string' && typeof file?.content === 'string')
+            .map((file: any) => `\n=== FILE: ${file.path} ===\n${file.content.slice(0, 12000)}\n`).join('')
+          if (code) return code
+        }
+      } else console.warn(`Workspace source download returned HTTP ${r.status} from Cloudinary.`)
+    } catch (error: any) {
+      console.warn('Workspace source download from Cloudinary failed:', error?.message || error)
+    }
+  }
   if (Array.isArray(sub.code_files) && sub.code_files.length) {
     let code = ''
     for (const file of sub.code_files) {

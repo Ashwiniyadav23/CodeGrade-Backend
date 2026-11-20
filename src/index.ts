@@ -32,29 +32,51 @@ console.log('🔧 Cloudinary config →', {
 
 const uploadToCloudinary = (filePath: string, folder: string, publicId: string): Promise<string> =>
   new Promise((resolve, reject) => {
+    if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
+      return reject(new Error('Cloudinary is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET before accepting uploads.'))
+    }
+    const extension = path.extname(filePath) || '.bin'
+    const filename = `${path.basename(publicId, path.extname(publicId))}${extension}`
     cloudinary.uploader.upload(
       filePath,
-      { resource_type: 'raw', folder, public_id: publicId, overwrite: true },
+      { resource_type: 'raw', folder, public_id: filename, overwrite: true },
       (err, result) => (err ? reject(err) : resolve(result!.secure_url))
     )
   })
 
-const cloudinaryMaxUploadBytes = 10 * 1024 * 1024
-const uploadToGridFS = (filePath: string, bucketName: string, filename: string): Promise<mongoose.Types.ObjectId> =>
+const uploadBufferToCloudinary = (buffer: Buffer, folder: string, filename: string): Promise<string> =>
   new Promise((resolve, reject) => {
-    if (!mongoose.connection.db) return reject(new Error('Database is not connected.'))
-    const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName })
-    const upload = bucket.openUploadStream(filename)
-    upload.once('error', reject)
-    upload.once('finish', () => resolve(upload.id as mongoose.Types.ObjectId))
-    fs.createReadStream(filePath).once('error', reject).pipe(upload)
+    if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
+      return reject(new Error('Cloudinary is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET before accepting uploads.'))
+    }
+    const upload = cloudinary.uploader.upload_stream(
+      { resource_type: 'raw', folder, public_id: filename, overwrite: true },
+      (err, result) => (err ? reject(err) : resolve(result!.secure_url))
+    )
+    upload.end(buffer)
   })
+
+const uploadWorkspaceFiles = (files: Array<{path:string; content:string}>, userId: string, assessmentId: string, submissionVersion?: number) =>
+  uploadBufferToCloudinary(
+    Buffer.from(JSON.stringify(files)),
+    submissionVersion === undefined ? 'codegrade/workspaces' : 'codegrade/workspace-submissions',
+    `${userId}-${assessmentId}${submissionVersion === undefined ? '' : `-v${submissionVersion}`}.json`
+  )
+
+const readCloudinaryWorkspaceFiles = async (url?: string) => {
+  if (!url) return null
+  const response = await fetch(url)
+  if (!response.ok) throw new Error(`Cloudinary workspace download returned HTTP ${response.status}.`)
+  const files = await response.json()
+  if (!Array.isArray(files)) throw new Error('Cloudinary workspace data is invalid.')
+  return files
+}
 
 const deleteFromCloudinary = async (cloudinaryUrl: string) => {
   try {
     const match = cloudinaryUrl.match(/\/upload\/(?:v\d+\/)?(.+)$/)
     if (match) {
-      const publicId = match[1].replace(/\.[^/.]+$/, '')
+      const publicId = match[1]
       await cloudinary.uploader.destroy(publicId, { resource_type: 'raw' })
     }
   } catch (_) {}
@@ -155,13 +177,15 @@ const storage = (dir: string, zipOnly: boolean) =>
 
 // Routes (unchanged from original)
 app.post('/api/auth/register', h(async (req: any, res: any) => {
-  const { email, password, full_name, batch, request_admin_access } = req.body
+  const { email, password, full_name, batch } = req.body
   if (!email || !password || password.length < 6) return res.status(400).json({ error: 'Email and a 6+ character password are required' })
   const normalizedEmail = email.toLowerCase().trim()
   if (await User.findOne({ email: normalizedEmail })) return res.status(400).json({ error: 'Email already registered' })
   const isConfiguredAdmin = !!process.env.ADMIN_EMAIL && normalizedEmail === process.env.ADMIN_EMAIL.toLowerCase().trim()
   const role = isConfiguredAdmin ? 'admin' : 'student'
-  const admin_access_status = isConfiguredAdmin ? 'approved' : request_admin_access ? 'pending' : 'none'
+  // New accounts stay students by default. Admin access is requested later
+  // from the authenticated Admin Access page and approved by an existing admin.
+  const admin_access_status = isConfiguredAdmin ? 'approved' : 'none'
   const u = await User.create({ email: normalizedEmail, full_name, batch, role, admin_access_status, password_hash: await bcrypt.hash(password, 10) })
   res.json({ token: sign(u) })
 }))
@@ -194,11 +218,9 @@ app.put('/api/admin-access/requests/:id', auth('admin'), h(async (req: any, res:
 app.get('/api/students', auth('admin'), h(async (_q: any, res: any) => res.json(await User.find({ role: 'student' }).sort('full_name'))))
 app.post('/api/upload/starter', auth('admin'), storage('starters', false).single('file'), h(async (req: any, res: any) => {
   const tempPath = req.file.path
-  const publicId = `codegrade/starters/${req.user.id}-${Date.now()}`
+  const publicId = `${req.user.id}-${Date.now()}`
   try {
-    const url = req.file.size > cloudinaryMaxUploadBytes
-      ? `gridfs:${await uploadToGridFS(tempPath, 'starters', path.basename(req.file.originalname))}`
-      : await uploadToCloudinary(tempPath, 'codegrade/starters', publicId)
+    const url = await uploadToCloudinary(tempPath, 'codegrade/starters', publicId)
     fs.unlinkSync(tempPath)
     res.json({ url })
   } catch (err) {
@@ -238,6 +260,7 @@ app.delete('/api/assessments/:id', auth('admin'), h(async (req: any, res: any) =
   for (const s of subs) {
     if (s.zip_path && fs.existsSync(s.zip_path)) fs.unlinkSync(s.zip_path)
     if ((s as any).cloudinary_url) await deleteFromCloudinary((s as any).cloudinary_url)
+    if ((s as any).code_files_url) await deleteFromCloudinary((s as any).code_files_url)
   }
   await Evaluation.deleteMany({ submission: { $in: subs.map(s => s.id) } })
   await Submission.deleteMany({ assessment: req.params.id })
@@ -310,7 +333,9 @@ const evaluateAndStore = async (submission: any, assessment: any) => {
 app.get('/api/assessments/:id/workspace', auth('student'), h(async (req: any, res: any) => {
   if (!await assignedAssessment(req)) return res.status(403).json({ error: 'Not assigned to you' })
   const submission = await Submission.findOne({ assessment: req.params.id, student: req.user.id }).sort('-created_at')
-  res.json({ files: submission?.code_files ?? [{ path: 'index.js', content: '// Start coding here\n' }], submitted: submission?.status === 'submitted' || submission?.status === 'review' || submission?.status === 'published' })
+  const files = await readCloudinaryWorkspaceFiles(submission?.code_files_url)
+    ?? (Array.isArray(submission?.code_files) && submission.code_files.length ? submission.code_files : [{ path: 'index.js', content: '// Start coding here\n' }])
+  res.json({ files, submitted: submission?.status === 'submitted' || submission?.status === 'review' || submission?.status === 'published' })
 }))
 
 app.post('/api/assessments/:id/theory', auth('student'), h(async (req: any, res: any) => {
@@ -336,9 +361,10 @@ app.put('/api/assessments/:id/workspace', auth('student'), h(async (req: any, re
   const files = validateCodeFiles(req.body.files)
   const existing = await Submission.findOne({ assessment: A.id, student: req.user.id }).sort('-created_at')
   if (existing?.status === 'submitted' && !A.allow_resubmit) return res.status(400).json({ error: 'Resubmission is not allowed' })
+  const code_files_url = await uploadWorkspaceFiles(files, String(req.user.id), String(A.id))
   const submission = existing && existing.status === 'workspace'
-    ? await Submission.findByIdAndUpdate(existing.id, { code_files: files }, { new: true })
-    : await Submission.create({ assessment: A.id, student: req.user.id, code_files: files, version: (existing?.version ?? 0) + 1, status: 'workspace' })
+    ? await Submission.findByIdAndUpdate(existing.id, { code_files_url }, { new: true })
+    : await Submission.create({ assessment: A.id, student: req.user.id, code_files_url, version: (existing?.version ?? 0) + 1, status: 'workspace' })
   res.json({ ok: true, submission })
 }))
 
@@ -349,9 +375,11 @@ app.post('/api/assessments/:id/workspace/submit', auth('student'), h(async (req:
   const files = validateCodeFiles(req.body.files)
   const existing = await Submission.findOne({ assessment: A.id, student: req.user.id }).sort('-created_at')
   if (existing?.status === 'submitted' && !A.allow_resubmit) return res.status(400).json({ error: 'Resubmission is not allowed' })
+  const version = existing?.status === 'workspace' ? existing.version : (existing?.version ?? 0) + 1
+  const code_files_url = await uploadWorkspaceFiles(files, String(req.user.id), String(A.id), version)
   const submission = existing && existing.status === 'workspace'
-    ? await Submission.findByIdAndUpdate(existing.id, { code_files: files, status: 'submitted' }, { new: true })
-    : await Submission.create({ assessment: A.id, student: req.user.id, code_files: files, version: (existing?.version ?? 0) + 1, status: 'submitted' })
+    ? await Submission.findByIdAndUpdate(existing.id, { code_files_url, status: 'submitted' }, { new: true })
+    : await Submission.create({ assessment: A.id, student: req.user.id, code_files_url, version, status: 'submitted' })
   if (A.theory_enabled) {
     submission.theory_questions = await generateTheoryQuestions(submission, A)
     submission.status = 'theory_pending'
@@ -434,25 +462,20 @@ app.post('/api/assessments/:id/submissions', auth('student'), storage('submissio
     fs.writeFileSync(tempPath, buffer)
   }
 
-  // ---- Upload to Cloudinary if we have a file (multipart or decoded) ----
+  // ---- Upload the original ZIP to Cloudinary; keep source contents out of MongoDB. ----
   let cloudinary_url: string | undefined
-  let file_id: mongoose.Types.ObjectId | undefined
-  let code_files: Array<{ path: string; content: string }> = []
   if (hasFile || tempPath) {
     const filePath = hasFile ? req.file.path : tempPath!
-    const publicId = `codegrade/submissions/${req.user.id}-${Date.now()}`
+    const publicId = `${req.user.id}-${Date.now()}`
     try {
+      let sourceFiles: Array<{ path: string; content: string }>
       try {
-        code_files = extractSubmissionFiles(fs.readFileSync(filePath))
+        sourceFiles = extractSubmissionFiles(fs.readFileSync(filePath))
       } catch {
         return fail(400, 'The uploaded file is not a valid ZIP archive.')
       }
-      if (!code_files.length) return fail(400, 'The ZIP contains no supported source files to evaluate.')
-      if (fs.statSync(filePath).size > cloudinaryMaxUploadBytes) {
-        file_id = await uploadToGridFS(filePath, 'submissions', path.basename(filePath))
-      } else {
-        cloudinary_url = await uploadToCloudinary(filePath, 'codegrade/submissions', publicId)
-      }
+      if (!sourceFiles.length) return fail(400, 'The ZIP contains no supported source files to evaluate.')
+      cloudinary_url = await uploadToCloudinary(filePath, 'codegrade/submissions', publicId)
     } finally {
       // Clean up the temporary file in both cases
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
@@ -463,8 +486,6 @@ app.post('/api/assessments/:id/submissions', auth('student'), storage('submissio
     assessment: A.id,
     student: req.user.id,
     cloudinary_url,
-    file_id,
-    code_files,
     github_url: hasGitUrl ? req.body.github_url : undefined,
     version: (prev?.version ?? 0) + 1,
   })
@@ -523,6 +544,7 @@ app.delete('/api/submissions/:id', auth('admin'), h(async (req: any, res: any) =
   if (!submission) return res.status(404).json({ error: 'Submission not found' })
   if (submission.zip_path && fs.existsSync(submission.zip_path)) fs.unlinkSync(submission.zip_path)
   if ((submission as any).cloudinary_url) await deleteFromCloudinary((submission as any).cloudinary_url)
+  if ((submission as any).code_files_url) await deleteFromCloudinary((submission as any).code_files_url)
   if (submission.file_id && mongoose.connection.db) {
     const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'submissions' })
     await bucket.delete(submission.file_id).catch(() => undefined)
